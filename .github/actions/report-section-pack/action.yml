@@ -1,0 +1,67 @@
+name: report-section-pack
+description: >-
+  Pack a CI report-comment section via ts-rig-ci and upload it as an artifact.
+  Requires host deps already installed (pair with setup-node-pnpm).
+
+inputs:
+  section:
+    description: Section id (coverage, lighthouse, mutation, e2e, …)
+    required: true
+  step-outcome:
+    description: Outcome of the producing step/job (success, failure, …)
+    required: true
+  missing-report:
+    description: Behavior when report files are missing (job-failed, skipped, …)
+    required: true
+  body-file:
+    description: Path to markdown body produced by a *-summary helper
+    required: true
+  artifact-name:
+    description: Artifact name for the packed section.json
+    required: true
+  report:
+    description: Optional path to a single report file
+    required: false
+    default: ''
+  report-dir:
+    description: Optional path to a report directory
+    required: false
+    default: ''
+  out:
+    description: Output path for section.json
+    required: false
+    default: ci-section/section.json
+
+runs:
+  using: composite
+  steps:
+    - name: Pack report-comment section
+      shell: bash
+      run: |
+        set -euo pipefail
+        mkdir -p "$(dirname "${{ inputs.out }}")"
+        ARGS=(
+          report-comment pack
+          --section "${{ inputs.section }}"
+          --step-outcome "${{ inputs.step-outcome }}"
+          --missing-report "${{ inputs.missing-report }}"
+          --body-file "${{ inputs.body-file }}"
+          --out "${{ inputs.out }}"
+        )
+        REPORT='${{ inputs.report }}'
+        REPORT_DIR='${{ inputs.report-dir }}'
+        if [ -n "$REPORT" ]; then
+          ARGS+=(--report "$REPORT")
+        fi
+        if [ -n "$REPORT_DIR" ]; then
+          ARGS+=(--report-dir "$REPORT_DIR")
+        fi
+        pnpm exec ts-rig-ci "${ARGS[@]}"
+
+    - name: Upload section artifact
+      uses: actions/upload-artifact@v7
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: ${{ inputs.out }}
+        retention-days: 1
+        if-no-files-found: ignore

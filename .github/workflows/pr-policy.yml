@@ -1,0 +1,52 @@
+# Reusable gate-ratchet job. Caller must trigger on pull_request_target and
+# pass through the PR event context. Workflow + script execute from the PR
+# *base* ref only; head is fetched as git objects and parsed as data.
+name: pr-policy
+
+on:
+  workflow_call:
+    inputs:
+      node-version:
+        type: string
+        required: false
+        default: '22'
+      pnpm-version:
+        type: string
+        required: false
+        default: '10.28.0'
+
+permissions:
+  contents: read
+
+jobs:
+  pr-policy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout base ref only
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          fetch-depth: 0
+
+      - name: Setup Node and pnpm
+        uses: ./.github/actions/setup-node-pnpm
+        with:
+          node-version: ${{ inputs.node-version }}
+          pnpm-version: ${{ inputs.pnpm-version }}
+          install: 'true'
+
+      - name: Fetch head as data (works for forks)
+        run: |
+          git fetch --no-tags --depth=1 origin \
+            pull/${{ github.event.pull_request.number }}/head:refs/gate-ratchet/head
+
+      - name: Gate ratchet (base script vs head tree)
+        env:
+          PR_POLICY_BODY: ${{ github.event.pull_request.body }}
+          PR_POLICY_BRANCH: ${{ github.head_ref }}
+          PR_POLICY_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: >
+          pnpm exec ts-rig-gate pr-policy
+          --base-ref "$PR_POLICY_BASE_SHA"
+          --head-ref refs/gate-ratchet/head
+          --pr-body-env PR_POLICY_BODY
