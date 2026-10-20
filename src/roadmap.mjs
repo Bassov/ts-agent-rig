@@ -30,9 +30,12 @@ const fail = (m) => {
 
 export const folderName = (id) => id.replace(/[^A-Za-z0-9._-]/g, '-')
 export const itemLink = (msId, slug) => `roadmap/${folderName(msId)}/${slug}.md`
+/** @deprecated Legacy git-archive path; check errors if this folder still exists. */
 export const archiveLink = (msId) =>
   `roadmap/archive/${folderName(msId)}/README.md`
 const rel = (root, p) => path.relative(root, p).split(path.sep).join('/')
+const MIGRATE_ARCHIVE =
+  'finished milestones are retired (roadmap archive <M> deletes the folder); remove ## Archive and docs/roadmap/archive/ — git history is SoT'
 
 // ---------- fs helpers ----------
 export function atomicWrite(file, content) {
@@ -217,14 +220,13 @@ function defaultBody(tag) {
 function findMilestone(ctx, id) {
   const ms = ctx.milestones.find((m) => m.id === id)
   if (ms) return ms
-  if (ctx.archived.some((a) => a.id === id)) fail(`milestone ${id} is archived`)
+  if (ctx.archived.some((a) => a.id === id))
+    fail(`milestone ${id}: ${MIGRATE_ARCHIVE}`)
   fail(`unknown milestone: ${id}`)
 }
 function findItem(ctx, slug, what = 'slug') {
   const it = ctx.items.find((i) => i.slug === slug)
   if (it) return it
-  if (archivedItems(ctx.root).has(slug))
-    fail(`${what} ${slug} is in an archived milestone`)
   fail(`unknown ${what}: ${slug}`)
 }
 /** -> { milestone, index (insert before), pad (needs blank line before), desc } */
@@ -283,37 +285,23 @@ const insertLine = (lines, pos, line) => [
 export const itemLine = ({ done, tag, slug, link, title }) =>
   `- [${done ? 'x' : ' '}] ${tag ? `[${tag}] ` : ''}[${slug}](${link}) — ${title}`
 
-// ---------- archive ----------
-/** Moves docs/roadmap/<F> -> archive/<F>, writes README.md, returns new index lines (caller writes index). */
+// ---------- archive (retire) ----------
+/**
+ * Retire a fully-done milestone: drop its index block and delete docs/roadmap/<F>/.
+ * Does not write docs/roadmap/archive/ — git history is SoT.
+ */
 export function archiveMilestone(ctx, msId) {
   const ms = findMilestone(ctx, msId)
   const F = folderName(ms.id)
   const src = path.join(ctx.root, DIR_REL, F)
-  const dst = path.join(ctx.root, ARCHIVE_REL, F)
-  const block = ctx.lines.slice(ms.start, ms.end)
-  while (block.at(-1) === '') block.pop()
-  const readme =
-    block.map((l) => l.split(`](roadmap/${F}/`).join('](')).join('\n') + '\n'
-  atomicWrite(path.join(src, 'README.md'), readme)
-  fs.mkdirSync(path.dirname(dst), { recursive: true })
-  fs.renameSync(src, dst)
   const lines = [...ctx.lines.slice(0, ms.start), ...ctx.lines.slice(ms.end)]
-  const p = parseIndex(lines.join('\n'))
-  const archLine = `- [${ms.id} — ${ms.title}](${archiveLink(ms.id)})`
-  const last = p.archived.at(-1)
-  if (last) lines.splice(last.line + 1, 0, archLine)
-  else if (p.archiveStart !== null) {
-    let k = 0 // empty ## Archive: replace its blank lines
-    while (lines[p.archiveStart + 1 + k] === '') k++
-    lines.splice(p.archiveStart + 1, k, '', archLine, '')
-  } else {
-    while (lines.at(-1) === '') lines.pop()
-    lines.push('', '## Archive', '', archLine)
-  }
-  if (lines.at(-1) !== '') lines.push('') // the index always ends with a newline
+  while (lines.length > 1 && lines.at(-1) === '' && lines.at(-2) === '')
+    lines.pop()
+  if (lines.at(-1) !== '') lines.push('')
+  if (isDir(src)) fs.rmSync(src, { recursive: true, force: true })
   return {
     lines,
-    readme: rel(ctx.root, path.join(dst, 'README.md')),
+    removed: rel(ctx.root, src),
     milestone: ms.id,
   }
 }
@@ -340,11 +328,7 @@ function itemView(ctx, it, withBody) {
 export function assertOpenItem(ctx, slug, o = {}) {
   if (!slug) fail('slug required')
   const it = ctx.items.find((i) => i.slug === slug)
-  if (!it) {
-    if (archivedItems(ctx.root).has(slug))
-      fail(`already done (archived): ${slug}`)
-    fail(`unknown slug: ${slug}`)
-  }
+  if (!it) fail(`unknown slug: ${slug}`)
   if (it.done) fail(`already done: ${slug}`)
   if (it.tag === 'contingency' && !o.includeContingency)
     fail(
@@ -372,23 +356,8 @@ export function cmdClaim(ctx, slug, o = {}) {
 }
 export function cmdShow(ctx, slug, o = {}) {
   const it = ctx.items.find((i) => i.slug === slug)
-  if (it) return itemView(ctx, it, !o.noBody)
-  const arch = archivedItems(ctx.root).get(slug)
-  if (!arch) fail(`unknown slug: ${slug}`)
-  const text = fs.readFileSync(arch[0].file, 'utf8')
-  const meta = parseItemFile(text)
-  const v = {
-    slug,
-    tag: meta.tag === 'none' ? null : meta.tag,
-    status: 'done (archived)',
-    milestone: meta.milestone,
-    milestoneTitle: null,
-    goal: [],
-    title: meta.title,
-    file: rel(ctx.root, arch[0].file),
-  }
-  if (!o.noBody) v.body = stripMeta(text)
-  return v
+  if (!it) fail(`unknown slug: ${slug}`)
+  return itemView(ctx, it, !o.noBody)
 }
 export function cmdList(ctx, o = {}) {
   let ms = ctx.milestones
@@ -408,14 +377,10 @@ export function cmdList(ctx, o = {}) {
           title: i.title,
         })),
     })),
-    archived:
-      o.milestone !== undefined ? undefined : ctx.archived.map((a) => a.id),
   }
 }
 export function allSlugs(ctx) {
-  const s = new Set(ctx.items.map((i) => i.slug))
-  for (const k of archivedItems(ctx.root).keys()) s.add(k)
-  return s
+  return new Set(ctx.items.map((i) => i.slug))
 }
 export function cmdAdd(ctx, slug, o) {
   if (!slug)
@@ -470,11 +435,7 @@ export function cmdDone(ctx, slug, o = {}) {
   if (note !== null && (!note || /[\r\n]/.test(note)))
     fail('--note must be one non-empty line')
   const it = ctx.items.find((i) => i.slug === slug)
-  if (!it) {
-    if (archivedItems(ctx.root).has(slug))
-      fail(`already done (archived): ${slug}`)
-    fail(`unknown slug: ${slug}`)
-  }
+  if (!it) fail(`unknown slug: ${slug}`)
   if (it.done) fail(`already done: ${slug}`)
   if (it.tag === 'contingency' && note === null)
     fail(
@@ -509,7 +470,7 @@ export function cmdSync(ctx) {
   if (ticked.length) writeIndex(ctx, lines)
   return { ticked, count: ticked.length }
 }
-/** Archive a fully-done milestone (post-merge operator step). */
+/** Retire a fully-done milestone (post-merge operator step): drop index block + delete folder. */
 export function cmdArchive(ctx, msId) {
   if (!msId) fail('usage: archive <milestone>')
   const ms = findMilestone(ctx, msId)
@@ -521,17 +482,13 @@ export function cmdArchive(ctx, msId) {
         .map((i) => i.slug)
         .join(', ')}`,
     )
-  const dst = path.join(ctx.root, ARCHIVE_REL, folderName(ms.id))
-  if (fs.existsSync(dst))
-    fail(`archive folder already exists: ${rel(ctx.root, dst)}`)
-  // Ensure index ticks match file-done before moving.
   const synced = cmdSync(ctx)
   const c = synced.count ? load(ctx.root) : ctx
   const a = archiveMilestone(c, msId)
   writeIndex(c, a.lines)
   return {
     archived: a.milestone,
-    readme: a.readme,
+    removed: a.removed,
     ticked: synced.ticked,
   }
 }
@@ -640,6 +597,10 @@ export function cmdCheck(ctx) {
         `archive: ${m.id} is fully done but still active (run roadmap archive ${m.id})`,
       )
   }
+  if (ctx.archiveStart !== null || ctx.archived.length)
+    E.push(`archive: ## Archive section must be removed (${MIGRATE_ARCHIVE})`)
+  if (isDir(path.join(ctx.root, ARCHIVE_REL)))
+    E.push(`archive: ${ARCHIVE_REL}/ must not exist (${MIGRATE_ARCHIVE})`)
   const base = path.join(ctx.root, DIR_REL)
   const activeFolders = new Map(
     ctx.milestones.map((m) => [folderName(m.id), m.id]),
@@ -657,45 +618,6 @@ export function cmdCheck(ctx) {
         E.push(`orphan: docs/${link} has ${n} index lines (expected 1)`)
     }
   }
-  const arch = archivedItems(ctx.root)
-  for (const [slug, locs] of arch) {
-    if (locs.length > 1)
-      E.push(
-        `unique: ${slug} archived in ${locs.map((l) => l.folder).join(', ')}`,
-      )
-    if (seen.has(slug))
-      E.push(
-        `unique: ${slug} is both active (${L(seen.get(slug))}) and archived (${locs[0].folder})`,
-      )
-    for (const l of locs) {
-      const h = parseItemFile(fs.readFileSync(l.file, 'utf8')).heading
-      if (h !== slug)
-        E.push(
-          `heading: ${rel(ctx.root, l.file)}: heading "# ${h}" does not match slug ${slug}`,
-        )
-    }
-  }
-  const archFolders = listDirs(path.join(ctx.root, ARCHIVE_REL))
-  const lineCount = new Map()
-  for (const a of ctx.archived) {
-    const want = archiveLink(a.id)
-    if (a.link !== want)
-      E.push(`archive: ${L(a.line)}: ${a.id} links ${a.link}, expected ${want}`)
-    const F = folderName(a.id)
-    lineCount.set(F, (lineCount.get(F) || 0) + 1)
-    if (!isDir(path.join(ctx.root, ARCHIVE_REL, F)))
-      E.push(`archive: ${L(a.line)}: missing folder ${ARCHIVE_REL}/${F}/`)
-    else if (!isFile(path.join(ctx.root, ARCHIVE_REL, F, 'README.md')))
-      E.push(`archive: missing ${ARCHIVE_REL}/${F}/README.md`)
-    if (ids.has(a.id)) E.push(`archive: ${a.id} is both active and archived`)
-  }
-  for (const F of archFolders) {
-    const n = lineCount.get(F) || 0
-    if (n !== 1)
-      E.push(
-        `archive: ${ARCHIVE_REL}/${F}/ has ${n} archive lines in the index (expected 1)`,
-      )
-  }
   return {
     ok: E.length === 0,
     errors: E,
@@ -703,7 +625,7 @@ export function cmdCheck(ctx) {
     items: ctx.items.length,
     open: ctx.items.filter((i) => !i.done).length,
     milestones: ctx.milestones.length,
-    archived: ctx.archived.length,
+    archived: 0,
   }
 }
 
@@ -816,7 +738,7 @@ export function genSlug(title) {
 }
 
 export const INDEX_NOTE =
-  'Process: [roadmap/RULES.md](roadmap/RULES.md). One file per item: `roadmap/<milestone>/<slug>.md`; finished milestones: `roadmap/archive/`. Change the index only with `pnpm roadmap` (`add` / `done` / `move`), never by hand.'
+  'Process: [roadmap/RULES.md](roadmap/RULES.md). One file per item: `roadmap/<milestone>/<slug>.md`. Retire a finished milestone with `pnpm roadmap archive <M>` (drops the index block and folder; git history is SoT). Change the index only with `pnpm roadmap` (`add` / `done` / `move` / `sync` / `archive`), never by hand.'
 /** Owner-approved header rewrites applied by migrate (old sentence start -> new). */
 export const HEADER_REWRITES = [
   [
@@ -937,15 +859,7 @@ export function cmdMigrate(source, root, o = {}) {
     o.rulesFile ? fs.readFileSync(o.rulesFile) : rules.join('\n') + '\n',
   )
   files++
-  // archive finished milestones through the same code path as `done`
-  const archivedNow = []
-  for (const s of src.sections) {
-    if (!s.items.length || !s.items.every((i) => i.done)) continue
-    const ctx = load(root)
-    const a = archiveMilestone(ctx, s.id)
-    writeIndex(ctx, a.lines)
-    archivedNow.push(s.id)
-  }
+  // Fully-done milestones stay active; operator retires them with `archive <M>`.
   const verify = verifyMigration(src, text, root, { rewritten })
   const items = src.sections.flatMap((s) => s.items)
   return {
@@ -953,9 +867,9 @@ export function cmdMigrate(source, root, o = {}) {
     done: items.filter((i) => i.done).length,
     open: items.filter((i) => !i.done).length,
     milestones: src.sections.filter((s) => s.kind === 'milestone').length,
-    archived: archivedNow,
+    archived: [],
     generatedSlugs: items.filter((i) => i.generatedSlug).map((i) => i.slug),
-    filesWritten: files + archivedNow.length,
+    filesWritten: files,
     indexBytes: fs.statSync(indexPath).size,
     verify,
   }
@@ -971,7 +885,6 @@ export function verifyMigration(
 ) {
   let rewrittenLines = 0
   const ctx = load(root)
-  const arch = archivedItems(root)
   const missing = []
   let bodyLines = 0,
     globalLines = 0
@@ -985,28 +898,12 @@ export function verifyMigration(
   }
   walk(path.join(root, DIR_REL))
   for (const l of ctx.lines) allOut.add(l)
-  const indexAndReadmes = new Map() // slug -> parsed item line (from index or archive README)
+  const indexAndReadmes = new Map()
   for (const it of ctx.items) indexAndReadmes.set(it.slug, it)
-  for (const d of listDirs(path.join(root, ARCHIVE_REL))) {
-    const rp = path.join(root, ARCHIVE_REL, d, 'README.md')
-    for (const l of fs.readFileSync(rp, 'utf8').split('\n')) {
-      const m = ITEM_RE.exec(l)
-      if (m)
-        indexAndReadmes.set(m[3], {
-          done: m[1] !== ' ',
-          tag: m[2] || null,
-          slug: m[3],
-          title: m[5],
-          link: m[4],
-        })
-    }
-  }
   for (const s of src.sections)
     for (const it of s.items) {
       const active = ctx.items.find((i) => i.slug === it.slug)
-      const file = active
-        ? itemAbs(ctx, active.link)
-        : arch.get(it.slug)?.[0].file
+      const file = active ? itemAbs(ctx, active.link) : null
       if (!file || !isFile(file)) {
         missing.push(`${it.slug}: no item file`)
         continue
@@ -1124,7 +1021,7 @@ export function parseArgs(argv) {
   }
   return o
 }
-const HELP = `usage: pnpm roadmap <cmd> [--root <repo>] [--json]   (= node scripts/roadmap.mjs)
+const HELP = `usage: pnpm roadmap <cmd> [--root <repo>] [--json]
   next [--slug S] [--skip a,b] [--include-contingency] [--no-body]   current item (first open, or explicit slug)
   show <slug> [--no-body]                                 one item
   list [--milestone M] [--open]                           one line per item
@@ -1132,7 +1029,7 @@ const HELP = `usage: pnpm roadmap <cmd> [--root <repo>] [--json]   (= node scrip
   add <slug> --tag prep|feature|contingency --title "..." (--after S | --before S | --milestone M [--top|--bottom]) [--body "..." | --body-file F]
   done <slug> [--note "..."]                              mark Status: done in the item file (no index tick; required note for [contingency])
   sync                                                    tick index [x] from item-file Status: done (post-merge)
-  archive <M>                                             archive a fully-done milestone (post-merge)
+  archive <M>                                             retire a fully-done milestone: drop index block + delete folder (post-merge)
   move <slug> (--after S | --before S | --milestone M [--top|--bottom])
   check                                                   consistency (exit 1 on errors; warnings for pending sync/archive)
   migrate <source.md> [--rules-file RULES.md] [--force]   one-off conversion into <root>/docs/`
@@ -1153,16 +1050,15 @@ export const textFormat = {
   next: (r) => (r ? fmtItem(r) : 'next: none (no open item)'),
   show: fmtItem,
   list: (r) =>
-    [
-      ...r.milestones.flatMap((m) => [
+    r.milestones
+      .flatMap((m) => [
         `${m.id} — ${m.title} (${m.done}/${m.total} done)`,
         ...m.items.map(
           (i) =>
             `[${i.done ? 'x' : ' '}] ${i.slug}${i.tag ? ` (${i.tag})` : ''} — ${i.title}`,
         ),
-      ]),
-      ...(r.archived?.length ? [`archived: ${r.archived.join(', ')}`] : []),
-    ].join('\n'),
+      ])
+      .join('\n'),
   add: (r) =>
     `added ${r.added} to ${r.milestone} (${r.position}); file ${r.file}`,
   done: (r) =>
@@ -1177,7 +1073,7 @@ export const textFormat = {
       ? `synced ${r.count} index tick(s): ${r.ticked.join(', ')}`
       : 'sync: nothing to tick',
   archive: (r) => {
-    const head = `archived ${r.archived} -> ${r.readme}`
+    const head = `retired ${r.archived} (removed ${r.removed})`
     return r.ticked?.length
       ? `${head}\nsynced ticks: ${r.ticked.join(', ')}`
       : head
@@ -1185,16 +1081,20 @@ export const textFormat = {
   move: (r) =>
     `moved ${r.moved} ${r.from === r.to ? `within ${r.to}` : `${r.from} -> ${r.to}`} (${r.position}); file ${r.file}`,
   check: (r) => {
-    const head = r.ok
-      ? `check ok: ${r.items} items (${r.open} open), ${r.milestones} active milestones, ${r.archived} archived`
-      : [...r.errors, `check failed: ${r.errors.length} error(s)`].join('\n')
     const warn = r.warnings.map((w) => `warning: ${w}`)
-    return warn.length ? [head, ...warn].join('\n') : head
+    if (r.ok) {
+      const head = `check ok: ${r.items} items (${r.open} open), ${r.milestones} active milestones`
+      return warn.length ? [head, ...warn].join('\n') : head
+    }
+    return [
+      ...r.errors,
+      ...warn,
+      `check failed: ${r.errors.length} error(s)`,
+    ].join('\n')
   },
   migrate: (r) =>
     [
       `migrated ${r.items} items (${r.done} done, ${r.open} open) in ${r.milestones} milestones; ${r.filesWritten} files`,
-      `archived: ${r.archived.join(', ') || 'none'}`,
       `generated slugs: ${r.generatedSlugs.join(', ') || 'none'}`,
       `index: ${r.indexBytes} bytes`,
       `verify: ${r.verify.ok ? 'ok' : 'FAILED'} (${r.verify.itemsChecked} items, ${r.verify.bodyLines} body lines, ${r.verify.otherLines} other lines, ${r.verify.rewrittenLines} rewritten by owner decision)`,

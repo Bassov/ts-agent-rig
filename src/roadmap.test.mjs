@@ -30,7 +30,9 @@ import {
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const CLI = path.join(here, 'roadmap.mjs')
-const REPO = path.resolve(here, '../../..')
+const REPO = process.env.TS_RIG_HOST_ROOT
+  ? path.resolve(process.env.TS_RIG_HOST_ROOT)
+  : path.resolve(here, '../../photobooks')
 
 function ensureZ9SectionInRoadmapIndex(idxPath) {
   let text = fs.readFileSync(idxPath, 'utf8')
@@ -269,17 +271,16 @@ describe('parsing', () => {
 })
 
 describe('migrate', () => {
-  it('layout, archive of finished milestone, verification', () => {
+  it('layout, keeps finished milestone active, verification', () => {
     const root = tmp()
     const r = run(['migrate', SOURCE, '--root', root, '--json'])
     expect(r.code).toBe(0)
     const j = JSON.parse(r.out)
     expect(j.items).toBe(9)
-    expect(j.archived).toEqual(['A0'])
+    expect(j.archived).toEqual([])
     expect(j.verify.ok).toBe(true)
-    expect(exists(root, 'docs/roadmap/archive/A0/README.md')).toBe(true)
-    expect(exists(root, 'docs/roadmap/archive/A0/old-slug.md')).toBe(true)
-    expect(!exists(root, 'docs/roadmap/A0')).toBe(true)
+    expect(exists(root, 'docs/roadmap/archive')).toBe(false)
+    expect(exists(root, 'docs/roadmap/A0/old-slug.md')).toBe(true)
     expect(exists(root, 'docs/roadmap/A1/beta.md')).toBe(true)
     expect(
       exists(root, 'docs/roadmap/A2/INTRO.md'),
@@ -292,18 +293,13 @@ describe('migrate', () => {
       fs.readFileSync(path.join(root, 'docs/roadmap/DEFERRED.md'), 'utf8'),
     ).toMatch(/- Another idea/)
     const index = idx(root)
+    expect(index).not.toMatch(/## Archive/)
     expect(index).toMatch(
-      /\n## Archive\n\n- \[A0 — Done milestone\]\(roadmap\/archive\/A0\/README\.md\)\n$/,
+      /^- \[x\] \[old-slug\]\(roadmap\/A0\/old-slug\.md\) — uppercase done, no tag$/m,
     )
     expect(index).toMatch(
       /^- \[ \] \[feature\] \[beta\]\(roadmap\/A1\/beta\.md\) — beta title$/m,
     )
-    expect(
-      fs.readFileSync(
-        path.join(root, 'docs/roadmap/archive/A0/README.md'),
-        'utf8',
-      ),
-    ).toMatch(/\[old-slug\]\(old-slug\.md\)/)
     expect(
       fs.readFileSync(path.join(root, 'docs/roadmap/A1/beta.md'), 'utf8'),
     ).toMatch(
@@ -314,6 +310,9 @@ describe('migrate', () => {
     )
     expect(index).not.toMatch(/This file is the single source/)
     assertCheck(root)
+    expect(cli(root, 'check').out).toMatch(
+      /warning: archive: A0 is fully done but still active/,
+    )
     expect(
       run(['migrate', SOURCE, '--root', root]).code,
       'refuses to overwrite without --force',
@@ -371,7 +370,7 @@ describe('add', () => {
     expect(d.added).toEqual([
       '- [ ] [prep] [beta-overflow](roadmap/A1/beta-overflow.md) — overflow of beta',
     ])
-    expect(order(root).slice(0, 4)).toEqual([
+    expect(order(root).slice(3, 7)).toEqual([
       'alpha',
       'beta',
       'beta-overflow',
@@ -437,6 +436,9 @@ describe('add', () => {
       'A1',
     )
     expect(order(root)).toEqual([
+      'tooling-ci-and-things',
+      'old-slug',
+      'tooling-ci-and-things-2',
       'alpha',
       'beta',
       'gamma',
@@ -478,20 +480,15 @@ describe('add', () => {
   const rejects = [
     [['dup', 'beta', '--after', 'alpha'], /slug already exists: beta/],
     [
-      ['dup-archived', 'old-slug', '--after', 'alpha'],
+      ['dup-done', 'old-slug', '--after', 'alpha'],
       /slug already exists: old-slug/,
     ],
     [['bad slug', 'Bad_Slug', '--after', 'alpha'], /bad slug/],
-    [
-      ['archived milestone', 'x-1', '--milestone', 'A0'],
-      /milestone A0 is archived/,
-    ],
     [
       ['unknown milestone', 'x-1', '--milestone', 'Z9'],
       /unknown milestone: Z9/,
     ],
     [['unknown anchor', 'x-1', '--after', 'nope'], /unknown anchor: nope/],
-    [['archived anchor', 'x-1', '--before', 'old-slug'], /archived milestone/],
     [
       [
         'anchor/milestone mismatch',
@@ -554,12 +551,10 @@ describe('done', () => {
     const r = cli(root, 'done', 'beta')
     expect(r.code).toBe(2)
     expect(r.err).toMatch(/already done: beta/)
-    expect(cli(root, 'done', 'old-slug').err).toMatch(
-      /already done \(archived\)/,
-    )
+    expect(cli(root, 'done', 'old-slug').err).toMatch(/already done: old-slug/)
     expect(cli(root, 'done', 'nope').err).toMatch(/unknown slug/)
   })
-  it('last item does not archive; archive + sync move the milestone', () => {
+  it('last item does not retire; archive deletes the milestone folder', () => {
     const root = migrated()
     ok(root, 'done', 'beta')
     ok(root, 'done', 'gamma', '--note', 'not needed (gate passed in `beta`)')
@@ -572,10 +567,11 @@ describe('done', () => {
     expect(check.code).toBe(0)
     expect(check.out).toMatch(/warning: archive: A1 is fully done/)
     expect(ok(root, 'archive', 'A1')).toMatch(
-      /archived A1 -> docs\/roadmap\/archive\/A1\/README\.md/,
+      /retired A1 \(removed docs\/roadmap\/A1\)/,
     )
     expect(!exists(root, 'docs/roadmap/A1')).toBe(true)
-    expect(exists(root, 'docs/roadmap/archive/A1/beta.md')).toBe(true)
+    expect(exists(root, 'docs/roadmap/archive')).toBe(false)
+    expect(idx(root)).not.toMatch(/## A1/)
     expect(ok(root, 'next')).toMatch(/^slug: epsilon/)
     assertCheck(root)
   })
@@ -610,7 +606,7 @@ describe('done', () => {
       ok(root, 'done', 'gamma', '--note', 'not needed (gate passed in `beta`)'),
     ).toMatch(/^done gamma \(A1 2\/4\)\nnote: not needed/)
   })
-  it('archive of the last milestone at EOF keeps the trailing newline and creates ## Archive', () => {
+  it('archive of the last milestone at EOF retires it and keeps the trailing newline', () => {
     const root = tmp()
     fs.mkdirSync(path.join(root, 'docs/roadmap/M1'), { recursive: true })
     fs.writeFileSync(
@@ -624,11 +620,10 @@ describe('done', () => {
     expect(ok(root, 'done', 'a')).toBe('done a (M1 1/1)')
     expect(idx(root)).toMatch(/- \[ \] \[prep\] \[a\]/)
     expect(ok(root, 'archive', 'M1')).toMatch(
-      /archived M1 -> docs\/roadmap\/archive\/M1\/README\.md/,
+      /retired M1 \(removed docs\/roadmap\/M1\)/,
     )
-    expect(idx(root)).toBe(
-      '# R\n\n## Archive\n\n- [M1 — one](roadmap/archive/M1/README.md)\n',
-    )
+    expect(idx(root)).toBe('# R\n')
+    expect(exists(root, 'docs/roadmap/M1')).toBe(false)
     assertCheck(root)
     expect(ok(root, 'next')).toMatch(/next: none/)
   })
@@ -668,7 +663,7 @@ describe('move', () => {
     expect(ok(root, 'move', 'delta', '--before', 'beta')).toMatch(
       /moved delta within A1 \(before beta\)/,
     )
-    expect(order(root).slice(0, 4)).toEqual(['alpha', 'delta', 'beta', 'gamma'])
+    expect(order(root).slice(3, 7)).toEqual(['alpha', 'delta', 'beta', 'gamma'])
     const d = lineDiff(before, idx(root))
     expect(d.added.length).toBe(1)
     expect(d.added).toEqual(d.removed)
@@ -708,8 +703,8 @@ describe('move', () => {
     expect(cli(root, 'move', 'nope', '--after', 'beta').err).toMatch(
       /unknown slug/,
     )
-    expect(cli(root, 'move', 'beta', '--milestone', 'A0').err).toMatch(
-      /archived/,
+    expect(cli(root, 'move', 'beta', '--milestone', 'Z9').err).toMatch(
+      /unknown milestone/,
     )
     ok(root, 'move', 'beta', '--milestone', 'A2')
     ok(root, 'move', 'gamma', '--milestone', 'A2')
@@ -763,13 +758,20 @@ describe('check (one failing fixture per rule)', () => {
       /^unique: .*duplicate slug zeta/,
     ],
     [
-      'slug active and archived',
+      'legacy archive folder forbidden',
+      (r) => fs.mkdirSync(path.join(r, 'docs/roadmap/archive'), { recursive: true }),
+      /^archive: docs\/roadmap\/archive\/ must not exist/,
+    ],
+    [
+      'legacy Archive section forbidden',
       (r) =>
-        fs.copyFileSync(
-          path.join(r, 'docs/roadmap/A1/beta.md'),
-          path.join(r, 'docs/roadmap/archive/A0/beta.md'),
+        edit(
+          r,
+          'docs/roadmap.md',
+          '## Deferred (not scheduled)',
+          '## Archive\n\n- [M9 — Old](roadmap/archive/M9/README.md)\n\n## Deferred (not scheduled)',
         ),
-      /^unique: beta is both active/,
+      /^archive: ## Archive section must be removed/,
     ],
     [
       'nested line in index',
@@ -781,36 +783,6 @@ describe('check (one failing fixture per rule)', () => {
           '— beta title\n  - [ ] nested\n',
         ),
       /^single-line: .*indented/,
-    ],
-    [
-      'archive line without folder',
-      (r) =>
-        fs.renameSync(
-          path.join(r, 'docs/roadmap/archive/A0'),
-          path.join(r, 'docs/gone'),
-        ),
-      /^archive: .*missing folder docs\/roadmap\/archive\/A0\//,
-    ],
-    [
-      'archive folder without README',
-      (r) => fs.rmSync(path.join(r, 'docs/roadmap/archive/A0/README.md')),
-      /^archive: missing docs\/roadmap\/archive\/A0\/README\.md/,
-    ],
-    [
-      'archive folder without archive line',
-      (r) => fs.mkdirSync(path.join(r, 'docs/roadmap/archive/A9')),
-      /^archive: docs\/roadmap\/archive\/A9\/ has 0 archive lines/,
-    ],
-    [
-      'duplicate archive line',
-      (r) =>
-        edit(
-          r,
-          'docs/roadmap.md',
-          '- [A0 — Done milestone](roadmap/archive/A0/README.md)',
-          '- [A0 — Done milestone](roadmap/archive/A0/README.md)\n- [A0 — Done milestone](roadmap/archive/A0/README.md)',
-        ),
-      /has 2 archive lines/,
     ],
     [
       'heading mismatch',
@@ -826,12 +798,6 @@ describe('check (one failing fixture per rule)', () => {
       'title differs from item file',
       (r) => edit(r, 'docs/roadmap.md', '— beta title', '— beta title changed'),
       /^meta: docs\/roadmap\/A1\/beta\.md: Title differs from index line/,
-    ],
-    [
-      'archived heading mismatch',
-      (r) =>
-        edit(r, 'docs/roadmap/archive/A0/old-slug.md', '# old-slug', '# other'),
-      /^heading: docs\/roadmap\/archive\/A0\/old-slug\.md/,
     ],
   ]
   function edit(root, p, a, b) {
@@ -896,15 +862,16 @@ describe('next / show / list / cli', () => {
       /goal: Notes: \[INTRO\.md\]\(docs\/roadmap\/A2\/INTRO\.md\)/,
     )
   })
-  it('show archived item; list', () => {
+  it('show done item in active finished milestone; list', () => {
     const root = migrated()
     expect(ok(root, 'show', 'old-slug')).toMatch(
-      /status: done \(archived\)\nmilestone: A0/,
+      /status: done\nmilestone: A0 — Done milestone/,
     )
     expect(ok(root, 'list', '--open', '--milestone', 'A2')).toBe(
       'A2 — Second (0/2 done)\n[ ] epsilon (feature) — epsilon title\n[ ] zeta (prep) — zeta title',
     )
-    expect(ok(root, 'list')).toMatch(/archived: A0$/)
+    expect(ok(root, 'list')).not.toMatch(/archived:/)
+    expect(ok(root, 'list')).toMatch(/^A0 — Done milestone \(3\/3 done\)/)
   })
   it('usage errors', () => {
     const root = migrated()
@@ -1103,11 +1070,20 @@ describe('next / show / list / cli', () => {
 })
 
 describe('repository roadmap', () => {
-  it('docs/roadmap.md and docs/roadmap/** pass check', () => {
-    const r = cmdCheck(load(REPO))
-    expect(r.errors).toEqual([])
-    expect(r.items).toBeGreaterThan(0)
-  })
+  const hostReady =
+    fs.existsSync(path.join(REPO, 'docs/roadmap.md')) &&
+    !fs.existsSync(path.join(REPO, 'docs/roadmap/archive')) &&
+    !fs.readFileSync(path.join(REPO, 'docs/roadmap.md'), 'utf8').includes(
+      '## Archive',
+    )
+  it.skipIf(!hostReady)(
+    'host docs/roadmap.md passes check (no legacy archive)',
+    () => {
+      const r = cmdCheck(load(REPO))
+      expect(r.errors).toEqual([])
+      expect(r.items).toBeGreaterThan(0)
+    },
+  )
 })
 
 describe('exact outputs', () => {
@@ -1127,15 +1103,17 @@ describe('exact outputs', () => {
   it('migrate: report, tree and generated files', () => {
     const root = tmp()
     expect(run(['migrate', SOURCE, '--root', root]).out).toMatchInlineSnapshot(`
-      "migrated 9 items (4 done, 5 open) in 3 milestones; 13 files
-      archived: A0
+      "migrated 9 items (4 done, 5 open) in 3 milestones; 12 files
       generated slugs: tooling-ci-and-things, tooling-ci-and-things-2
-      index: 1160 bytes
+      index: 1474 bytes
       verify: ok (9 items, 8 body lines, 21 other lines, 1 rewritten by owner decision)"
     `)
     expect(tree(root)).toMatchInlineSnapshot(`
       [
         "docs/roadmap.md",
+        "docs/roadmap/A0/old-slug.md",
+        "docs/roadmap/A0/tooling-ci-and-things-2.md",
+        "docs/roadmap/A0/tooling-ci-and-things.md",
         "docs/roadmap/A1/alpha.md",
         "docs/roadmap/A1/beta.md",
         "docs/roadmap/A1/delta.md",
@@ -1145,10 +1123,6 @@ describe('exact outputs', () => {
         "docs/roadmap/A2/zeta.md",
         "docs/roadmap/DEFERRED.md",
         "docs/roadmap/RULES.md",
-        "docs/roadmap/archive/A0/README.md",
-        "docs/roadmap/archive/A0/old-slug.md",
-        "docs/roadmap/archive/A0/tooling-ci-and-things-2.md",
-        "docs/roadmap/archive/A0/tooling-ci-and-things.md",
       ]
     `)
     expect(idx(root)).toMatchInlineSnapshot(`
@@ -1158,11 +1132,17 @@ describe('exact outputs', () => {
 
       This index and the item files under \`docs/roadmap/\` are the single source of truth for the fixture.
 
-      Process: [roadmap/RULES.md](roadmap/RULES.md). One file per item: \`roadmap/<milestone>/<slug>.md\`; finished milestones: \`roadmap/archive/\`. Change the index only with \`pnpm roadmap\` (\`add\` / \`done\` / \`move\`), never by hand.
+      Process: [roadmap/RULES.md](roadmap/RULES.md). One file per item: \`roadmap/<milestone>/<slug>.md\`. Retire a finished milestone with \`pnpm roadmap archive <M>\` (drops the index block and folder; git history is SoT). Change the index only with \`pnpm roadmap\` (\`add\` / \`done\` / \`move\` / \`sync\` / \`archive\`), never by hand.
 
       ## Order
 
       1. A then B.
+
+      ## A0 — Done milestone
+
+      - [x] [tooling-ci-and-things](roadmap/A0/tooling-ci-and-things.md) — Tooling, CI and things
+      - [x] [old-slug](roadmap/A0/old-slug.md) — uppercase done, no tag
+      - [x] [tooling-ci-and-things-2](roadmap/A0/tooling-ci-and-things-2.md) — Tooling, CI and things
 
       ## A1 — First
 
@@ -1187,19 +1167,15 @@ describe('exact outputs', () => {
       ## Deferred (not scheduled)
 
       Not scheduled, not items: [roadmap/DEFERRED.md](roadmap/DEFERRED.md). To schedule one, the owner asks for an \`add\`.
-
-      ## Archive
-
-      - [A0 — Done milestone](roadmap/archive/A0/README.md)
       "
     `)
-    expect(read(root, 'docs/roadmap/archive/A0/README.md'))
+    expect(read(root, 'docs/roadmap/A0/tooling-ci-and-things.md'))
       .toMatchInlineSnapshot(`
-      "## A0 — Done milestone
+      "# tooling-ci-and-things
 
-      - [x] [tooling-ci-and-things](tooling-ci-and-things.md) — Tooling, CI and things
-      - [x] [old-slug](old-slug.md) — uppercase done, no tag
-      - [x] [tooling-ci-and-things-2](tooling-ci-and-things-2.md) — Tooling, CI and things
+      Tag: none
+      Milestone: A0
+      Title: Tooling, CI and things
       "
     `)
     expect(read(root, 'docs/roadmap/A2/INTRO.md')).toMatchInlineSnapshot(`
@@ -1244,15 +1220,6 @@ describe('exact outputs', () => {
       - [ ] still delta
       "
     `)
-    expect(read(root, 'docs/roadmap/archive/A0/tooling-ci-and-things.md'))
-      .toMatchInlineSnapshot(`
-      "# tooling-ci-and-things
-
-      Tag: none
-      Milestone: A0
-      Title: Tooling, CI and things
-      "
-    `)
   })
 
   it('next / show / list / check text and json', () => {
@@ -1287,96 +1254,106 @@ describe('exact outputs', () => {
     expect(ok(root, 'show', 'old-slug')).toMatchInlineSnapshot(`
       "slug: old-slug
       tag: none
-      status: done (archived)
-      milestone: A0
+      status: done
+      milestone: A0 — Done milestone
       title: uppercase done, no tag
-      file: docs/roadmap/archive/A0/old-slug.md
+      file: docs/roadmap/A0/old-slug.md
       ---
       "
     `)
     expect(JSON.parse(ok(root, 'show', 'old-slug', '--json')))
       .toMatchInlineSnapshot(`
-      {
-        "body": "",
-        "file": "docs/roadmap/archive/A0/old-slug.md",
-        "goal": [],
-        "milestone": "A0",
-        "milestoneTitle": null,
-        "slug": "old-slug",
-        "status": "done (archived)",
-        "tag": null,
-        "title": "uppercase done, no tag",
-      }
-    `)
+        {
+          "body": "",
+          "file": "docs/roadmap/A0/old-slug.md",
+          "goal": [],
+          "milestone": "A0",
+          "milestoneTitle": "Done milestone",
+          "slug": "old-slug",
+          "status": "done",
+          "tag": null,
+          "title": "uppercase done, no tag",
+        }
+      `)
     expect(ok(root, 'list')).toMatchInlineSnapshot(`
-      "A1 — First (1/4 done)
+      "A0 — Done milestone (3/3 done)
+      [x] tooling-ci-and-things — Tooling, CI and things
+      [x] old-slug — uppercase done, no tag
+      [x] tooling-ci-and-things-2 — Tooling, CI and things
+      A1 — First (1/4 done)
       [x] alpha (prep) — alpha title (Security Review: x)
       [ ] beta (feature) — beta title
       [ ] gamma (contingency) — only if beta fails
       [ ] delta (prep) — delta — with a dash in title
       A2 — Second (0/2 done)
       [ ] epsilon (feature) — epsilon title
-      [ ] zeta (prep) — zeta title
-      archived: A0"
+      [ ] zeta (prep) — zeta title"
     `)
     expect(JSON.parse(ok(root, 'list', '--open', '--json')))
       .toMatchInlineSnapshot(`
-      {
-        "archived": [
-          "A0",
-        ],
-        "milestones": [
-          {
-            "done": 1,
-            "id": "A1",
-            "items": [
-              {
-                "done": false,
-                "slug": "beta",
-                "tag": "feature",
-                "title": "beta title",
-              },
-              {
-                "done": false,
-                "slug": "gamma",
-                "tag": "contingency",
-                "title": "only if beta fails",
-              },
-              {
-                "done": false,
-                "slug": "delta",
-                "tag": "prep",
-                "title": "delta — with a dash in title",
-              },
-            ],
-            "title": "First",
-            "total": 4,
-          },
-          {
-            "done": 0,
-            "id": "A2",
-            "items": [
-              {
-                "done": false,
-                "slug": "epsilon",
-                "tag": "feature",
-                "title": "epsilon title",
-              },
-              {
-                "done": false,
-                "slug": "zeta",
-                "tag": "prep",
-                "title": "zeta title",
-              },
-            ],
-            "title": "Second",
-            "total": 2,
-          },
-        ],
-      }
-    `)
+        {
+          "milestones": [
+            {
+              "done": 3,
+              "id": "A0",
+              "items": [],
+              "title": "Done milestone",
+              "total": 3,
+            },
+            {
+              "done": 1,
+              "id": "A1",
+              "items": [
+                {
+                  "done": false,
+                  "slug": "beta",
+                  "tag": "feature",
+                  "title": "beta title",
+                },
+                {
+                  "done": false,
+                  "slug": "gamma",
+                  "tag": "contingency",
+                  "title": "only if beta fails",
+                },
+                {
+                  "done": false,
+                  "slug": "delta",
+                  "tag": "prep",
+                  "title": "delta — with a dash in title",
+                },
+              ],
+              "title": "First",
+              "total": 4,
+            },
+            {
+              "done": 0,
+              "id": "A2",
+              "items": [
+                {
+                  "done": false,
+                  "slug": "epsilon",
+                  "tag": "feature",
+                  "title": "epsilon title",
+                },
+                {
+                  "done": false,
+                  "slug": "zeta",
+                  "tag": "prep",
+                  "title": "zeta title",
+                },
+              ],
+              "title": "Second",
+              "total": 2,
+            },
+          ],
+        }
+      `)
     expect(ok(root, 'check')).toMatchInlineSnapshot(
-      `"check ok: 6 items (5 open), 2 active milestones, 1 archived"`,
+      `
+      "check ok: 9 items (5 open), 3 active milestones
+      warning: archive: A0 is fully done but still active (run roadmap archive A0)"
+    `,
     )
     expect(JSON.parse(ok(root, 'next', '--json', '--no-body')))
       .toMatchInlineSnapshot(`
@@ -1495,11 +1472,17 @@ describe('exact outputs', () => {
 
       This index and the item files under \`docs/roadmap/\` are the single source of truth for the fixture.
 
-      Process: [roadmap/RULES.md](roadmap/RULES.md). One file per item: \`roadmap/<milestone>/<slug>.md\`; finished milestones: \`roadmap/archive/\`. Change the index only with \`pnpm roadmap\` (\`add\` / \`done\` / \`move\`), never by hand.
+      Process: [roadmap/RULES.md](roadmap/RULES.md). One file per item: \`roadmap/<milestone>/<slug>.md\`. Retire a finished milestone with \`pnpm roadmap archive <M>\` (drops the index block and folder; git history is SoT). Change the index only with \`pnpm roadmap\` (\`add\` / \`done\` / \`move\` / \`sync\` / \`archive\`), never by hand.
 
       ## Order
 
       1. A then B.
+
+      ## A0 — Done milestone
+
+      - [x] [tooling-ci-and-things](roadmap/A0/tooling-ci-and-things.md) — Tooling, CI and things
+      - [x] [old-slug](roadmap/A0/old-slug.md) — uppercase done, no tag
+      - [x] [tooling-ci-and-things-2](roadmap/A0/tooling-ci-and-things-2.md) — Tooling, CI and things
 
       ## A1 — First
 
@@ -1526,10 +1509,6 @@ describe('exact outputs', () => {
       ## Deferred (not scheduled)
 
       Not scheduled, not items: [roadmap/DEFERRED.md](roadmap/DEFERRED.md). To schedule one, the owner asks for an \`add\`.
-
-      ## Archive
-
-      - [A0 — Done milestone](roadmap/archive/A0/README.md)
       "
     `)
   })
@@ -1539,7 +1518,7 @@ describe('exact outputs', () => {
     expect(run(['help']).code).toBe(0)
     expect(run([]).code).toBe(2)
     expect(run(['help']).out).toMatchInlineSnapshot(`
-      "usage: pnpm roadmap <cmd> [--root <repo>] [--json]   (= node scripts/roadmap.mjs)
+      "usage: pnpm roadmap <cmd> [--root <repo>] [--json]
         next [--slug S] [--skip a,b] [--include-contingency] [--no-body]   current item (first open, or explicit slug)
         show <slug> [--no-body]                                 one item
         list [--milestone M] [--open]                           one line per item
@@ -1547,7 +1526,7 @@ describe('exact outputs', () => {
         add <slug> --tag prep|feature|contingency --title "..." (--after S | --before S | --milestone M [--top|--bottom]) [--body "..." | --body-file F]
         done <slug> [--note "..."]                              mark Status: done in the item file (no index tick; required note for [contingency])
         sync                                                    tick index [x] from item-file Status: done (post-merge)
-        archive <M>                                             archive a fully-done milestone (post-merge)
+        archive <M>                                             retire a fully-done milestone: drop index block + delete folder (post-merge)
         move <slug> (--after S | --before S | --milestone M [--top|--bottom])
         check                                                   consistency (exit 1 on errors; warnings for pending sync/archive)
         migrate <source.md> [--rules-file RULES.md] [--force]   one-off conversion into <root>/docs/"
@@ -1618,7 +1597,7 @@ describe('exact outputs', () => {
         "2 error: title must be a single line",
         "2 error: use only one of --body / --body-file",
         "2 error: unknown slug: nope",
-        "2 error: slug old-slug is in an archived milestone",
+        "2 error: moving old-slug would leave A0 with no open items (finish or add items first)",
         "2 error: unknown option --bogus",
       ]
     `)
@@ -1633,22 +1612,25 @@ describe('exact outputs', () => {
     fs.writeFileSync(path.join(root, 'docs/roadmap/A2/stray.md'), '# stray\n')
     const r = cli(root, 'check')
     expect(r.out).toMatchInlineSnapshot(`
-      "file: docs/roadmap.md:20: beta: missing file docs/roadmap/A1/beta.md
+      "file: docs/roadmap.md:26: beta: missing file docs/roadmap/A1/beta.md
       orphan: docs/roadmap/A2/stray.md has 0 index lines (expected 1)
+      warning: archive: A0 is fully done but still active (run roadmap archive A0)
       check failed: 2 error(s)"
     `)
     expect(JSON.parse(cli(root, 'check', '--json').out)).toMatchInlineSnapshot(`
       {
-        "archived": 1,
+        "archived": 0,
         "errors": [
-          "file: docs/roadmap.md:20: beta: missing file docs/roadmap/A1/beta.md",
+          "file: docs/roadmap.md:26: beta: missing file docs/roadmap/A1/beta.md",
           "orphan: docs/roadmap/A2/stray.md has 0 index lines (expected 1)",
         ],
-        "items": 6,
-        "milestones": 2,
+        "items": 9,
+        "milestones": 3,
         "ok": false,
         "open": 5,
-        "warnings": [],
+        "warnings": [
+          "archive: A0 is fully done but still active (run roadmap archive A0)",
+        ],
       }
     `)
   })
@@ -1716,9 +1698,8 @@ Three.
     const r = cli(root, 'migrate', SOURCE2)
     expect(r.out).toMatchInlineSnapshot(`
       "migrated 6 items (0 done, 6 open) in 1 milestones; 7 files
-      archived: none
       generated slugs: tooling-ci-and-things-2, tooling-ci-and-things-3, tooling-ci-and-things-4, item
-      index: 962 bytes
+      index: 1058 bytes
       verify: ok (6 items, 2 body lines, 13 other lines, 1 rewritten by owner decision)"
     `)
     expect(read(root, 'docs/roadmap.md')).toMatchInlineSnapshot(`
@@ -1727,7 +1708,7 @@ Three.
       LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL header line.
         
 
-      Process: [roadmap/RULES.md](roadmap/RULES.md). One file per item: \`roadmap/<milestone>/<slug>.md\`; finished milestones: \`roadmap/archive/\`. Change the index only with \`pnpm roadmap\` (\`add\` / \`done\` / \`move\`), never by hand.
+      Process: [roadmap/RULES.md](roadmap/RULES.md). One file per item: \`roadmap/<milestone>/<slug>.md\`. Retire a finished milestone with \`pnpm roadmap archive <M>\` (drops the index block and folder; git history is SoT). Change the index only with \`pnpm roadmap\` (\`add\` / \`done\` / \`move\` / \`sync\` / \`archive\`), never by hand.
 
       ## Notes on how to use
 
@@ -1778,7 +1759,7 @@ Three.
             "tooling-ci-and-things-4",
             "item",
           ],
-          "indexBytes": 962,
+          "indexBytes": 1058,
           "items": 6,
           "milestones": 1,
           "open": 6,
@@ -1824,8 +1805,8 @@ Three.
         ['beta: no item file'],
       ],
       [
-        'archived item file deleted',
-        (r) => fs.rmSync(path.join(r, 'docs/roadmap/archive/A0/old-slug.md')),
+        'done milestone item file deleted',
+        (r) => fs.rmSync(path.join(r, 'docs/roadmap/A0/old-slug.md')),
         ['old-slug: no item file'],
       ],
       [
@@ -2096,7 +2077,7 @@ Three.
           )
           edit(r, 'docs/roadmap/A2/Zeta_x.md', '# zeta', '# Zeta_x')
         },
-        ['slug: docs/roadmap.md:31: bad slug Zeta_x'],
+        ['slug: docs/roadmap.md:37: bad slug Zeta_x'],
       ],
       [
         (r) =>
@@ -2116,70 +2097,24 @@ Three.
         [],
       ],
       [
-        (r) => {
-          fs.mkdirSync(path.join(r, 'docs/roadmap/archive/A9'))
-          fs.copyFileSync(
-            path.join(r, 'docs/roadmap/archive/A0/old-slug.md'),
-            path.join(r, 'docs/roadmap/archive/A9/old-slug.md'),
-          )
-          fs.writeFileSync(
-            path.join(r, 'docs/roadmap/archive/A9/README.md'),
-            '# A9\n',
-          )
-          edit(
-            r,
-            'docs/roadmap.md',
-            '(roadmap/archive/A0/README.md)',
-            '(roadmap/archive/A0/README.md)\n- [A9 — Nine](roadmap/archive/A9/README.md)',
-          )
-        },
-        ['unique: old-slug archived in A0, A9'],
-      ],
-      [
         (r) =>
-          edit(
-            r,
-            'docs/roadmap.md',
-            '(roadmap/archive/A0/README.md)',
-            '(roadmap/archive/A0/X.md)',
-          ),
+          fs.mkdirSync(path.join(r, 'docs/roadmap/archive'), {
+            recursive: true,
+          }),
         [
-          'archive: docs/roadmap.md:39: A0 links roadmap/archive/A0/X.md, expected roadmap/archive/A0/README.md',
+          'archive: docs/roadmap/archive/ must not exist (finished milestones are retired (roadmap archive <M> deletes the folder); remove ## Archive and docs/roadmap/archive/ — git history is SoT)',
         ],
       ],
       [
-        (r) => {
-          edit(
-            r,
-            'docs/roadmap.md',
-            '(roadmap/archive/A0/README.md)',
-            '(roadmap/archive/A0/README.md)\n- [A1 — First](roadmap/archive/A1/README.md)',
-          )
-          fs.mkdirSync(path.join(r, 'docs/roadmap/archive/A1'))
-          fs.writeFileSync(
-            path.join(r, 'docs/roadmap/archive/A1/README.md'),
-            '# A1\n',
-          )
-        },
-        ['archive: A1 is both active and archived'],
-      ],
-      [
         (r) =>
-          edit(r, 'docs/roadmap.md', '## Archive\n', '## Archive\n   \njunk\n'),
-        ['single-line: docs/roadmap.md:39: unexpected line in ## Archive'],
-      ],
-      [
-        (r) => {
           edit(
             r,
             'docs/roadmap.md',
-            '## Archive\n',
-            '## Archive\n\n- [A7 — Seven](roadmap/archive/A7/README.md)\n- [A7 — Seven](roadmap/archive/A7/README.md)\n',
-          )
-        },
+            '## Deferred (not scheduled)',
+            '## Archive\n\n- [M9 — Old](roadmap/archive/M9/README.md)\n\n## Deferred (not scheduled)',
+          ),
         [
-          'archive: docs/roadmap.md:39: missing folder docs/roadmap/archive/A7/',
-          'archive: docs/roadmap.md:40: missing folder docs/roadmap/archive/A7/',
+          'archive: ## Archive section must be removed (finished milestones are retired (roadmap archive <M> deletes the folder); remove ## Archive and docs/roadmap/archive/ — git history is SoT)',
         ],
       ],
     ]
@@ -2303,7 +2238,7 @@ Three.
       '# n4\n\nTag: feature\nMilestone: A1\nTitle: T\n\n## Scope\n\n- [ ] from file\n',
     )
     expect(
-      err(
+      ok(
         root,
         'add',
         'n5',
@@ -2313,11 +2248,12 @@ Three.
         'T',
         '--milestone',
         'A0',
+        '--bottom',
       ),
-    ).toBe('error: milestone A0 is archived')
+    ).toMatch(/added n5 to A0/)
   })
 
-  it('done: progress, note formatting; archive refuses existing folder then succeeds', () => {
+  it('done: progress, note formatting; archive retires the milestone', () => {
     const root = migrated()
     const zeta = read(root, 'docs/roadmap/A2/zeta.md')
     expect(ok(root, 'done', 'epsilon')).toBe('done epsilon (A2 1/2)')
@@ -2331,54 +2267,15 @@ Three.
     expect(read(root, 'docs/roadmap/A2/zeta.md')).toMatch(
       /Status: done\n[\s\S]*## Done note\n\nn\n$/,
     )
-    fs.mkdirSync(path.join(root, 'docs/roadmap/archive/A2'))
-    expect(err(root, 'archive', 'A2')).toBe(
-      'error: archive folder already exists: docs/roadmap/archive/A2',
+    expect(ok(root, 'archive', 'A2')).toMatch(
+      /retired A2 \(removed docs\/roadmap\/A2\)/,
     )
-    fs.rmdirSync(path.join(root, 'docs/roadmap/archive/A2'))
-    expect(ok(root, 'archive', 'A2')).toMatch(/archived A2/)
-    expect(read(root, 'docs/roadmap/archive/A2/zeta.md')).toMatch(
-      /Status: done\n[\s\S]*## Done note\n\nn\n$/,
-    )
-    expect(ok(root, 'list')).toMatch(/\narchived: A0, A2$/)
-    expect(ok(root, 'show', 'epsilon')).toMatch(
-      /^slug: epsilon\ntag: feature\nstatus: done \(archived\)\n/,
-    )
-    expect(ok(root, 'show', 'epsilon', '--no-body')).not.toContain('---')
-    expect(
-      idx(root).endsWith(
-        '## Archive\n\n- [A0 — Done milestone](roadmap/archive/A0/README.md)\n- [A2 — Second](roadmap/archive/A2/README.md)\n',
-      ),
-    ).toBe(true)
-    const r2 = migrated()
-    edit(
-      r2,
-      'docs/roadmap.md',
-      '- [A0 — Done milestone](roadmap/archive/A0/README.md)\n',
-      '',
-    )
-    fs.rmSync(path.join(r2, 'docs/roadmap/archive'), { recursive: true })
-    ok(r2, 'done', 'epsilon')
-    ok(r2, 'done', 'zeta')
-    ok(r2, 'archive', 'A2')
-    expect(
-      idx(r2).endsWith(
-        '## Archive\n\n- [A2 — Second](roadmap/archive/A2/README.md)\n',
-      ),
-    ).toBe(true)
-    expect(errors(r2)).toEqual([])
-    const r3 = migrated()
-    const archive =
-      '## Archive\n\n- [A0 — Done milestone](roadmap/archive/A0/README.md)\n'
-    edit(r3, 'docs/roadmap.md', '\n' + archive, '')
-    edit(r3, 'docs/roadmap.md', '## A2', archive + '\n## A2')
-    ok(r3, 'done', 'epsilon')
-    ok(r3, 'done', 'zeta')
-    ok(r3, 'archive', 'A2')
-    expect(idx(r3).endsWith('`add`.\n')).toBe(true)
-    expect(idx(r3)).toContain(
-      'README.md)\n- [A2 — Second](roadmap/archive/A2/README.md)\n\n## Deferred',
-    )
+    expect(exists(root, 'docs/roadmap/A2')).toBe(false)
+    expect(exists(root, 'docs/roadmap/archive')).toBe(false)
+    expect(idx(root)).not.toMatch(/## A2/)
+    expect(err(root, 'show', 'epsilon')).toMatch(/unknown slug: epsilon/)
+    expect(ok(root, 'list')).not.toMatch(/archived:/)
+    expect(errors(root)).toEqual([])
   })
 
   it('move: refusals with exact messages', () => {
@@ -2409,7 +2306,7 @@ Three.
     expect(ok(root, 'next', '--skip', ',')).toMatch(/^slug: beta\n/)
     expect(run(['check'], { cwd: root })).toEqual({
       code: 0,
-      out: 'check ok: 6 items (5 open), 2 active milestones, 1 archived',
+      out: 'check ok: 9 items (5 open), 3 active milestones\nwarning: archive: A0 is fully done but still active (run roadmap archive A0)',
     })
     expect(err(root, 'next', '--skip')).toBe(
       'error: --skip needs a value (use --skip=<value> for values starting with --)',
@@ -2494,7 +2391,7 @@ describe('withFileStatus and assertOpenItem edges', () => {
     expect(() => assertOpenItem(ctx, '')).toThrow(/slug required/)
     expect(() => assertOpenItem(ctx, 'nope')).toThrow(/unknown slug/)
     expect(() => assertOpenItem(ctx, 'old-slug')).toThrow(
-      /already done \(archived\)/,
+      /already done: old-slug/,
     )
     ok(root, 'done', 'beta', '--note', 'n')
     expect(() => assertOpenItem(load(root), 'beta')).toThrow(
@@ -2547,7 +2444,7 @@ describe('withFileStatus and assertOpenItem edges', () => {
     ok(root, 'done', 'epsilon', '--note', 'n')
     ok(root, 'done', 'zeta', '--note', 'n')
     const arch = ok(root, 'archive', 'A2')
-    expect(arch).toMatch(/archived A2/)
+    expect(arch).toMatch(/retired A2 \(removed docs\/roadmap\/A2\)/)
     expect(arch).toMatch(/synced ticks:/)
 
     expect(
@@ -2557,14 +2454,18 @@ describe('withFileStatus and assertOpenItem edges', () => {
       'claimed x (M)',
     )
     expect(
-      textFormat.archive({ archived: 'A', readme: 'r.md', ticked: [] }),
-    ).toBe('archived A -> r.md')
+      textFormat.archive({
+        archived: 'A',
+        removed: 'docs/roadmap/A',
+        ticked: [],
+      }),
+    ).toBe('retired A (removed docs/roadmap/A)')
     expect(
       textFormat.archive({
         archived: 'A',
-        readme: 'r.md',
+        removed: 'docs/roadmap/A',
         ticked: ['a', 'b'],
       }),
-    ).toBe('archived A -> r.md\nsynced ticks: a, b')
+    ).toBe('retired A (removed docs/roadmap/A)\nsynced ticks: a, b')
   })
 })
