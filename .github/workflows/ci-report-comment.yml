@@ -1,0 +1,60 @@
+# Reusable job: download a packed section artifact and merge into the PR CI comment.
+name: ci-report-comment
+
+on:
+  workflow_call:
+    inputs:
+      section:
+        description: Section id (coverage, lighthouse, mutation, e2e, …)
+        type: string
+        required: true
+      artifact-name:
+        description: Artifact name uploaded by report-section-pack
+        type: string
+        required: true
+      node-version:
+        type: string
+        required: false
+        default: '22'
+      pnpm-version:
+        type: string
+        required: false
+        default: '10.28.0'
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  ci-comment:
+    runs-on: ubuntu-latest
+    concurrency:
+      group: ci-report-${{ github.event.pull_request.number }}
+      queue: max
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Node and pnpm
+        uses: ./.github/actions/setup-node-pnpm
+        with:
+          node-version: ${{ inputs.node-version }}
+          pnpm-version: ${{ inputs.pnpm-version }}
+          install: 'true'
+
+      - name: Download section artifact
+        continue-on-error: true
+        uses: actions/download-artifact@v7
+        with:
+          name: ${{ inputs.artifact-name }}
+          path: ci-section
+
+      - name: Update CI report comment
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: >
+          pnpm exec ts-rig-ci report-comment apply
+          --section ${{ inputs.section }}
+          --artifact ci-section/section.json
