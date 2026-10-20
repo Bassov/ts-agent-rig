@@ -143,6 +143,7 @@ export function mutationScore(killed, timeout, survived, noCoverage) {
  *   files: Record<string, { mutants?: unknown[] }>,
  *   readFile?: (p: string) => string | null,
  *   changedFiles?: string[],
+ *   mutateRanges?: string[],
  * }} opts
  */
 export function buildMutationSummaryMarkdown(opts) {
@@ -207,6 +208,15 @@ export function buildMutationSummaryMarkdown(opts) {
     lines.push('### NoCoverage mutants', '')
     for (const sample of noCoverageSamples) {
       lines.push(sample)
+    }
+    lines.push('')
+  }
+
+  const mutateRanges = opts.mutateRanges
+  if (Array.isArray(mutateRanges) && mutateRanges.length > 0) {
+    lines.push('### Scored mutate ranges', '')
+    for (const spec of mutateRanges) {
+      lines.push(`- \`${spec}\``)
     }
     lines.push('')
   }
@@ -278,9 +288,19 @@ export function runStrykerPrSummaryCli(argv, env = process.env) {
   const report = JSON.parse(readFileSync(reportPath, 'utf8'))
   const files = report.files ?? {}
   const changedFiles = resolveChangedFilesForSummary(env)
+  const rangesPath = 'reports/mutation/mutate-ranges.txt'
+  /** @type {string[] | undefined} */
+  let mutateRanges
+  if (existsSync(rangesPath)) {
+    mutateRanges = readFileSync(rangesPath, 'utf8')
+      .split('\n')
+      .map((l) => l.trim())
+      .filter(Boolean)
+  }
   const markdown = buildMutationSummaryMarkdown({
     files,
     changedFiles,
+    mutateRanges,
     readFile: (p) => {
       if (!existsSync(p)) return null
       return readFileSync(p, 'utf8')

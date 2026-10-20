@@ -1,6 +1,6 @@
 {
   "name": "@albasov/ts-agent-rig",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "Agent pipeline, roadmap CLI, and quality-gate harness for TypeScript repos",
   "type": "module",
   "license": "MIT",
