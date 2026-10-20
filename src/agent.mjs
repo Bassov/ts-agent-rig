@@ -71,7 +71,7 @@ export const APPLY_ARCHIVE_PROCEDURE = `\
 Apply/archive (≤10):
 1. After proposal+design+tasks(+specs): review-brief --out <file>; openspec-planning-reviewer once (≤1 re-review).
 2. Implement tasks; tick checkboxes; keep touch-set.
-3. pnpm check (OK lines only); e2e/stryker/lhci when in scope.
+3. pnpm check (OK lines only; includes patch-coverage + stryker:diff via pre-push); e2e/lhci when in scope.
 4. openspec-implementation-reviewer (brief --out); Manual check; Security if tagged.
 5. Archive: sync delta specs, pnpm agent archive <slug>, pnpm roadmap done <slug>.
 6. Commit; pnpm agent finish --title … --body-file … (no CI watch).
@@ -83,7 +83,7 @@ export const PREP_APPLY_ARCHIVE_PROCEDURE = `\
 Apply/archive prep fast-track (≤10):
 1. Brief proposal.md + tasks.md; skip design.md unless arch/security; skip_specs:true if no src/ capability behavior change (touch .skip-specs / .skip-design). Skip openspec-planning-reviewer.
 2. Implement; keep touch-set (intra-capability helper/test OK).
-3. pnpm check (OK lines); e2e/stryker/lhci when in scope.
+3. pnpm check (OK lines; includes patch-coverage + stryker:diff via pre-push); e2e/lhci when in scope.
 4. openspec-implementation-reviewer; Manual check; Security if tagged. ([x] ticks → quality:self-check)
 5. Archive: sync deltas if any, pnpm agent archive <slug>, pnpm roadmap done <slug>.
 6. Commit; pnpm agent finish --title … --body-file … (no CI watch).
