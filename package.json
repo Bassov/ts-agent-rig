@@ -1,6 +1,6 @@
 {
   "name": "@albasov/ts-agent-rig",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Agent pipeline, roadmap CLI, and quality-gate harness for TypeScript repos",
   "type": "module",
   "license": "MIT",
@@ -39,7 +39,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "build": "tsc -p tsconfig.json",
     "test:unit": "vitest run test/unit",
-    "test:integration": "vitest run test/integration"
+    "test:integration": "vitest run test/integration",
+    "test:host": "vitest run --config vitest.host.config.mjs"
   },
   "dependencies": {
     "typescript": "~5.9.3",

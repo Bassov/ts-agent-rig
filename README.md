@@ -28,3 +28,9 @@ pnpm test:pack-smoke
 ```
 
 No Stryker on this package — Vitest + V8 coverage + pack-smoke only.
+
+## CI / tests
+
+- `pnpm test` / `pnpm test:coverage` — fast unit + integration (`test/`).
+- `pnpm test:pack-smoke` — pack + install into a temp host fixture.
+- `pnpm test:host` — full lifted suite under `src/**/*.test.mjs` (expects a Photobooks-shaped host with `quality/gates.json`, roadmap, Stryker configs). Not run in this repo's GitHub Actions.
