@@ -178,11 +178,12 @@ export function evaluateNoCoverageGate(fileMap) {
 
 /**
  * Build Stryker argv for a planned diff run.
- * @param {string[]} mutateFiles
+ * Prefer line-scoped specs (`path:start-end`); plain paths still work.
+ * @param {string[]} mutateSpecs
  * @param {boolean} allowEmpty
  */
-export function buildStrykerArgs(mutateFiles, allowEmpty) {
-  const args = [DIFF_CONFIG, '--mutate', mutateFiles.join(',')]
+export function buildStrykerArgs(mutateSpecs, allowEmpty) {
+  const args = [DIFF_CONFIG, '--mutate', mutateSpecs.join(',')]
   if (allowEmpty) args.push('--allowEmpty')
   return args
 }
