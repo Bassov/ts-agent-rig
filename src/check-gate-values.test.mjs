@@ -38,14 +38,6 @@ function coherentFiles(overrides = {}) {
       'quality/gates.json\nnumberOfRuns: gates.lighthouse.numberOfRuns\nassertions: gates.lighthouse.assertions',
     '/repo/playwright.config.ts':
       "import { loadGates } from '@albasov/ts-agent-rig/load-gates'\nretries: gates.playwright.retries\nretries: gates.playwright.flakyRetries",
-    '/repo/packages/ts-agent-rig/src/e2e-burn-in-count.mjs':
-      "import { loadGates } from './load-gates.mjs'\nload({ root }).e2e.burnInDefault",
-    '/repo/packages/ts-agent-rig/src/e2e-flaky-list.mjs':
-      "import { loadGates } from './load-gates.mjs'",
-    '/repo/packages/ts-agent-rig/src/load-gates.mjs':
-      "export const GATES_RELATIVE_PATH = 'quality/gates.json'",
-    '/repo/packages/ts-agent-rig/src/check-patch-coverage.mjs':
-      "import { loadGates } from './load-gates.mjs'\nloadGates().coverage.patch",
     '/repo/.github/workflows/integration.yml': 'jobs: {}',
     ...overrides,
   }

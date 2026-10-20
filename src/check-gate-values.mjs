@@ -12,10 +12,6 @@ export const CONSUMER_RELATIVE_PATHS = [
   'stryker.config.mjs',
   'lighthouserc.cjs',
   'playwright.config.ts',
-  'packages/ts-agent-rig/src/e2e-burn-in-count.mjs',
-  'packages/ts-agent-rig/src/e2e-flaky-list.mjs',
-  'packages/ts-agent-rig/src/load-gates.mjs',
-  'packages/ts-agent-rig/src/check-patch-coverage.mjs',
 ]
 
 export const WORKFLOW_RELATIVE_PATH = '.github/workflows/integration.yml'
