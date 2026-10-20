@@ -34,8 +34,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # Absolute ref: reusable workflows resolve `./` against the *caller* repo.
       - name: Setup Node and pnpm
-        uses: ./.github/actions/setup-node-pnpm
+        uses: Bassov/ts-agent-rig/.github/actions/setup-node-pnpm@v0.2.1
         with:
           node-version: ${{ inputs.node-version }}
           pnpm-version: ${{ inputs.pnpm-version }}

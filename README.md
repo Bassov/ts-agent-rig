@@ -31,12 +31,14 @@ No Stryker on this package — Vitest + V8 coverage + pack-smoke only.
 
 ## GitHub Actions (host CI)
 
-Pin by **git tag** (Actions are not in the npm tarball):
+Pin by **git tag** (Actions are not in the npm tarball). Reusable workflows must
+reference composites with a full `Bassov/ts-agent-rig/...@vX` ref — `./` resolves
+against the *caller* repo, not this one.
 
 ```yaml
-- uses: Bassov/ts-agent-rig/.github/actions/setup-node-pnpm@v0.2.0
+- uses: Bassov/ts-agent-rig/.github/actions/setup-node-pnpm@v0.2.1
 
-- uses: Bassov/ts-agent-rig/.github/actions/report-section-pack@v0.2.0
+- uses: Bassov/ts-agent-rig/.github/actions/report-section-pack@v0.2.1
   if: always()
   with:
     section: coverage
@@ -50,7 +52,7 @@ jobs:
   ci-comment:
     needs: checks
     if: always() && github.event_name == 'pull_request' && needs.checks.result != 'cancelled'
-    uses: Bassov/ts-agent-rig/.github/workflows/ci-report-comment.yml@v0.2.0
+    uses: Bassov/ts-agent-rig/.github/workflows/ci-report-comment.yml@v0.2.1
     with:
       section: coverage
       artifact-name: ci-section-coverage
@@ -58,7 +60,7 @@ jobs:
 
   # Caller keeps pull_request_target trigger + concurrency:
   pr-policy:
-    uses: Bassov/ts-agent-rig/.github/workflows/pr-policy.yml@v0.2.0
+    uses: Bassov/ts-agent-rig/.github/workflows/pr-policy.yml@v0.2.1
     secrets: inherit
 ```
 
