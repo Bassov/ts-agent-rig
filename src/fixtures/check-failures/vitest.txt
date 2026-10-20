@@ -1,0 +1,36 @@
+
+ RUN  v5.0.4 
+
+ ❯ scripts/_tmp_unit_fail.test.mjs (1 test | 1 failed) 6ms
+   ❯ fixture-fail (1)
+     × fails on purpose 5ms
+
+ Test Files  1 failed (1)
+      Tests  1 failed (1)
+   Start at  17:21:24
+   Duration  527ms (environment 90%, transform 5%, tests 1%, setup 1%, import 1%, worker 1%)
+
+JUNIT report written to reports/vitest-junit.xml
+
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  scripts/_tmp_unit_fail.test.mjs > fixture-fail > fails on purpose
+AssertionError: expected 1 to be 2 // Object.is equality
+
+- Expected
++ Received
+
+- 2
++ 1
+
+ ❯ scripts/_tmp_unit_fail.test.mjs:4:15
+      2| describe('fixture-fail', () => {
+      3|   it('fails on purpose', () => {
+      4|     expect(1).toBe(2)
+       |               ^
+      5|   })
+      6| })
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
