@@ -116,7 +116,12 @@ export function computePatchCoverage(opts = {}) {
     (typeof gates.coverage?.patch === 'number' ? gates.coverage.patch : 85)
 
   let base = opts.baseRef
-  if (base === undefined) base = resolvePrPolicyBaseRef({ root, git })
+  if (base === undefined) {
+    const env = opts.env ?? process.env
+    // Prefer STRYKER_DIFF_BASE (phase SHA) so patch-coverage matches stryker:diff / e2e:changed; else GATE_RATCHET_BASE / origin/main.
+    const phaseBase = String(env.STRYKER_DIFF_BASE ?? '').trim()
+    base = phaseBase || resolvePrPolicyBaseRef({ root, git, env })
+  }
   if (!base) {
     return {
       ok: true,

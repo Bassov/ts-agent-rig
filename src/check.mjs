@@ -41,6 +41,18 @@ export const DEFAULT_CORE_CHECKS = Object.freeze([
 export const DEFAULT_AFTER_UNIT = Object.freeze([])
 
 export const DEFAULT_OPTIONAL = Object.freeze([])
+
+/** Integrity inventory member names (excluded from derived fast core). */
+export const INTEGRITY_CHECK_NAMES = Object.freeze([
+  'openspec-budget',
+  'codecov-yml',
+  'roadmap',
+])
+
+const INTEGRITY_NAME_SET = new Set(INTEGRITY_CHECK_NAMES)
+
+/** @typedef {'fast' | 'integrity' | 'core'} CheckInventoryMode */
+
 /**
  * @param {unknown} row
  * @returns {{ name: string, argv?: string[], script?: string } | null}
@@ -61,6 +73,36 @@ function normalizeCheckRow(row) {
 }
 
 /**
+ * @param {unknown[]} raw
+ * @returns {{ name: string, argv?: string[], script?: string }[]}
+ */
+function normalizeCheckList(raw) {
+  return raw.map(normalizeCheckRow).filter(Boolean)
+}
+
+/**
+ * @param {{ name: string, argv?: string[], script?: string }[]} core
+ */
+export function deriveFastCore(core) {
+  return core.filter((c) => !INTEGRITY_NAME_SET.has(c.name))
+}
+
+/**
+ * @param {{ name: string, argv?: string[], script?: string }[]} core
+ */
+export function deriveIntegrityChecks(core) {
+  return core.filter((c) => INTEGRITY_NAME_SET.has(c.name))
+}
+
+/**
+ * Fast afterUnit drops `stryker-diff` (not part of any check inventory).
+ * @param {{ name: string, argv?: string[], script?: string }[]} afterUnit
+ */
+export function deriveFastAfterUnit(afterUnit) {
+  return afterUnit.filter((c) => c.name !== 'stryker-diff')
+}
+
+/**
  * @param {string} root
  * @param {{ loadGatesFn?: typeof loadGates }} [io]
  */
@@ -77,32 +119,41 @@ export function resolveCheckTables(root, io = {}) {
       const coreRaw = Array.isArray(b.core) ? b.core : null
       const afterRaw = Array.isArray(b.afterUnit) ? b.afterUnit : null
       const optRaw = Array.isArray(b.optional) ? b.optional : null
-      const core = coreRaw
-        ? coreRaw.map(normalizeCheckRow).filter(Boolean)
+      const fastRaw = Array.isArray(b.fast) ? b.fast : null
+      const integrityRaw = Array.isArray(b.integrity) ? b.integrity : null
+      const coreNorm = coreRaw ? normalizeCheckList(coreRaw) : null
+      const afterNorm = afterRaw ? normalizeCheckList(afterRaw) : null
+      const optNorm = optRaw ? normalizeCheckList(optRaw) : null
+      const fastNorm = fastRaw ? normalizeCheckList(fastRaw) : null
+      const integrityNorm = integrityRaw
+        ? normalizeCheckList(integrityRaw)
         : null
-      const afterUnit = afterRaw
-        ? afterRaw.map(normalizeCheckRow).filter(Boolean)
-        : null
-      const optional = optRaw
-        ? optRaw.map(normalizeCheckRow).filter(Boolean)
-        : null
-      return {
-        core: core && core.length > 0 ? core : [...DEFAULT_CORE_CHECKS],
-        afterUnit:
-          afterUnit && afterUnit.length > 0
-            ? afterUnit
-            : [...DEFAULT_AFTER_UNIT],
-        optional:
-          optional && optional.length > 0 ? optional : [...DEFAULT_OPTIONAL],
-      }
+      const core =
+        coreNorm && coreNorm.length > 0 ? coreNorm : [...DEFAULT_CORE_CHECKS]
+      const afterUnit =
+        afterNorm && afterNorm.length > 0
+          ? afterNorm
+          : [...DEFAULT_AFTER_UNIT]
+      const optional =
+        optNorm && optNorm.length > 0 ? optNorm : [...DEFAULT_OPTIONAL]
+      const fast =
+        fastNorm && fastNorm.length > 0 ? fastNorm : deriveFastCore(core)
+      const integrity =
+        integrityNorm && integrityNorm.length > 0
+          ? integrityNorm
+          : deriveIntegrityChecks(core)
+      return { core, afterUnit, optional, fast, integrity }
     }
   } catch {
     // Missing/invalid gates → built-in fallback (gate-values check still fails).
   }
+  const core = [...DEFAULT_CORE_CHECKS]
   return {
-    core: [...DEFAULT_CORE_CHECKS],
+    core,
     afterUnit: [...DEFAULT_AFTER_UNIT],
     optional: [...DEFAULT_OPTIONAL],
+    fast: deriveFastCore(core),
+    integrity: deriveIntegrityChecks(core),
   }
 }
 
@@ -144,27 +195,78 @@ export function isNoiseLine(line) {
 }
 
 /**
+ * @param {unknown} value
+ * @returns {CheckInventoryMode | null}
+ */
+export function normalizeInventoryMode(value) {
+  if (value === 'fast' || value === 'integrity' || value === 'core') return value
+  return null
+}
+
+/**
+ * Resolve inventory mode from CLI args / env. Default: `fast`.
+ * @param {string[]} args
+ * @param {NodeJS.ProcessEnv} [env]
+ * @returns {CheckInventoryMode}
+ */
+export function resolveInventoryMode(args, env = process.env) {
+  const flagIdx = args.indexOf('--inventory')
+  if (flagIdx !== -1) {
+    const raw = args[flagIdx + 1]
+    const mode = normalizeInventoryMode(raw)
+    if (!mode) {
+      throw new Error(
+        'usage: --inventory fast|integrity|core (default: fast)',
+      )
+    }
+    return mode
+  }
+  const fromEnv = normalizeInventoryMode(env.CHECK_INVENTORY)
+  return fromEnv ?? 'fast'
+}
+
+/**
+ * @param {{ name: string, argv?: string[], script?: string }} c
+ * @param {string} root
+ * @returns {{ name: string, argv: string[] } | null}
+ */
+function toArgvEntry(c, root) {
+  if (c.argv) return { name: c.name, argv: [...c.argv] }
+  if (c.script) {
+    return {
+      name: c.name,
+      argv: [process.execPath, path.join(root, c.script)],
+    }
+  }
+  return null
+}
+
+/**
  * @param {string} root
  * @param {{
  *   existsSync?: (p: string) => boolean
  *   loadGatesFn?: typeof loadGates
+ *   inventoryMode?: CheckInventoryMode
  * }} [io]
  * @returns {{ name: string, argv: string[] }[]}
  */
 export function buildInventory(root, io = {}) {
   const exists = io.existsSync ?? fs.existsSync
+  const mode = io.inventoryMode ?? 'fast'
   const tables = resolveCheckTables(root, io)
+  const primary =
+    mode === 'integrity'
+      ? tables.integrity
+      : mode === 'core'
+        ? tables.core
+        : tables.fast
   /** @type {{ name: string, argv: string[] }[]} */
   const list = []
-  for (const c of tables.core) {
-    if (c.argv) list.push({ name: c.name, argv: [...c.argv] })
-    else if (c.script) {
-      list.push({
-        name: c.name,
-        argv: [process.execPath, path.join(root, c.script)],
-      })
-    }
+  for (const c of primary) {
+    const entry = toArgvEntry(c, root)
+    if (entry) list.push(entry)
   }
+  if (mode === 'integrity') return list
   for (const opt of tables.optional) {
     if (opt.argv) {
       list.push({ name: opt.name, argv: [...opt.argv] })
@@ -185,14 +287,19 @@ export function buildInventory(root, io = {}) {
  * @param {{
  *   existsSync?: (p: string) => boolean
  *   loadGatesFn?: typeof loadGates
+ *   inventoryMode?: CheckInventoryMode
  * }} [io]
  */
 export function buildAfterUnitInventory(root, io = {}) {
+  const mode = io.inventoryMode ?? 'fast'
+  if (mode === 'integrity') return []
   const exists = io.existsSync ?? fs.existsSync
   const tables = resolveCheckTables(root, io)
+  const rows =
+    mode === 'fast' ? deriveFastAfterUnit(tables.afterUnit) : tables.afterUnit
   /** @type {{ name: string, argv: string[], scriptRel?: string }[]} */
   const list = []
-  for (const c of tables.afterUnit) {
+  for (const c of rows) {
     if (c.script) {
       if (!exists(path.join(root, c.script))) continue
       list.push({
@@ -401,6 +508,7 @@ export async function runOneCheck(opts) {
  *   root?: string
  *   verbose?: boolean
  *   skipUnit?: boolean
+ *   inventoryMode?: CheckInventoryMode
  *   env?: NodeJS.ProcessEnv
  *   spawnImpl?: typeof spawn
  *   existsSync?: (p: string) => boolean
@@ -414,8 +522,10 @@ export async function runOneCheck(opts) {
 export async function runChecks(opts = {}) {
   const root = opts.root ?? ROOT_DEFAULT
   const verbose = Boolean(opts.verbose)
+  const inventoryMode = opts.inventoryMode ?? 'fast'
+  const tableIo = { ...opts, inventoryMode }
 
-  let inventory = opts.inventory ?? buildInventory(root, opts)
+  let inventory = opts.inventory ?? buildInventory(root, tableIo)
   if (opts.skipUnit) {
     inventory = inventory.filter((c) => c.name !== 'unit')
   }
@@ -437,8 +547,9 @@ export async function runChecks(opts = {}) {
     ),
   )
 
-  if (!opts.skipUnit) {
-    for (const check of buildAfterUnitInventory(root, opts)) {
+  // Integrity has no unit/afterUnit wave; skipUnit also skips afterUnit.
+  if (!opts.skipUnit && inventoryMode !== 'integrity') {
+    for (const check of buildAfterUnitInventory(root, tableIo)) {
       results.push(
         await runOneCheck({
           name: check.name,
@@ -496,12 +607,19 @@ export async function main(argv, opts = {}) {
     args.includes('-v') ||
     process.env.CHECK_VERBOSE === '1'
   const skipUnit = args.includes('--skip-unit')
+  const writeErr = opts.write ?? ((t) => process.stderr.write(t))
+  let inventoryMode
+  try {
+    inventoryMode = resolveInventoryMode(args, opts.env ?? process.env)
+  } catch (err) {
+    writeErr(`${err instanceof Error ? err.message : String(err)}\n`)
+    return 2
+  }
   let runSpec = null
   try {
     runSpec = parseRunArgs(args)
   } catch (err) {
-    const write = opts.write ?? ((t) => process.stderr.write(t))
-    write(`${err instanceof Error ? err.message : String(err)}\n`)
+    writeErr(`${err instanceof Error ? err.message : String(err)}\n`)
     return 2
   }
   if (runSpec) {
@@ -519,6 +637,7 @@ export async function main(argv, opts = {}) {
     ...opts,
     verbose,
     skipUnit,
+    inventoryMode,
   })
   return summary.ok ? 0 : 1
 }
