@@ -5,12 +5,16 @@ import fs from 'node:fs'
 import { createRequire } from 'node:module'
 import path from 'node:path'
 import { readReviewChecklistIds } from './review-checklist.mjs'
-import { runQualitySelfCheck } from './quality-self-check.mjs'
 import {
   checkPlanSize,
   computeDiffSize,
   DIFF_SIZE_MAX,
 } from './check-diff-size.mjs'
+import {
+  greenTreeStampPath,
+  isGreenTreeStampCurrent,
+  writeGreenTreeStamp,
+} from './green-tree-stamp.mjs'
 import {
   archiveOpenSpecChange,
   ensureOpenSpecChange,
@@ -70,11 +74,11 @@ const VALUE = new Set([
 export const APPLY_ARCHIVE_PROCEDURE = `\
 Apply/archive (≤10):
 1. After proposal+design+tasks(+specs): review-brief --out <file>; openspec-planning-reviewer once (≤1 re-review).
-2. Implement tasks; tick checkboxes; keep touch-set.
+2. Implement tasks; tick checkboxes; keep touch-set. No commit until first B.
 3. pnpm check (OK lines only); e2e/stryker/lhci when in scope.
 4. openspec-implementation-reviewer (brief --out); Manual check; Security if tagged.
 5. Archive: sync delta specs, pnpm agent archive <slug>, pnpm roadmap done <slug>.
-6. Commit; pnpm agent finish --title … --body-file … (no CI watch).
+6. Stage 10: PR body. Stage 11: check:integrity + quality:self-check + agent stamp-green. Stage 12: agent finish (thin push+PR; no CI watch).
 Explore: grep ≤30; offset/limit if >400 lines; no re-read; no TodoWrite in -p.
 Task shape: reviewer skill set + brief file path only.`
 
@@ -82,11 +86,11 @@ Task shape: reviewer skill set + brief file path only.`
 export const PREP_APPLY_ARCHIVE_PROCEDURE = `\
 Apply/archive prep fast-track (≤10):
 1. Brief proposal.md + tasks.md; skip design.md unless arch/security; skip_specs:true if no src/ capability behavior change (touch .skip-specs / .skip-design). Skip openspec-planning-reviewer.
-2. Implement; keep touch-set (intra-capability helper/test OK).
+2. Implement; keep touch-set (intra-capability helper/test OK). No commit until first B.
 3. pnpm check (OK lines); e2e/stryker/lhci when in scope.
-4. openspec-implementation-reviewer; Manual check; Security if tagged. ([x] ticks → quality:self-check)
+4. openspec-implementation-reviewer; Manual check; Security if tagged.
 5. Archive: sync deltas if any, pnpm agent archive <slug>, pnpm roadmap done <slug>.
-6. Commit; pnpm agent finish --title … --body-file … (no CI watch).
+6. Stage 10: PR body. Stage 11: check:integrity + quality:self-check + agent stamp-green. Stage 12: agent finish (thin push+PR; no CI watch).
 Explore: grep ≤30; offset/limit if >400; no re-read; no TodoWrite in -p.
 Task shape: skill set + brief path only.`
 
@@ -158,7 +162,8 @@ export function parseArgs(argv) {
 
 const HELP = `usage: pnpm agent <cmd> [--root <repo>] [--json] [--quiet]
   preflight [--slug S] [--skip a,b]   env + roadmap next (+ branch from origin/main); run card
-  finish --title T --body-file F   self-check → push (pre-push pnpm check; ≤2/branch) → PR
+  finish --title T --body-file F   thin push+PR (≤2/branch; no main merge; warn if stamp stale)
+  stamp-green   write .cache/agent-green-tree (stage 11 after integrity+self-check)
   review-brief [--change S] [--base REF] [--rules-json '[…]'] [--out FILE]   reviewer brief
   size [--plan] [--change S]   plan estimate / merge-base..HEAD changed lines
   manual-qa [--change S] [--base-url U]   headless Playwright smoke (composer-2.5 subagent)
@@ -1541,6 +1546,17 @@ export function mergeOriginMainIfNeeded(exec, root, cwd, env, quiet) {
   return { merged: true, resolved: files }
 }
 
+export function cmdStampGreen(_o, deps) {
+  const { root, cwd, env, exec } = deps
+  const stamp = writeGreenTreeStamp(root, { exec, cwd, env })
+  return {
+    ok: true,
+    stamp,
+    path: greenTreeStampPath(root),
+    summary: `green-tree stamp written: ${stamp}`,
+  }
+}
+
 export function cmdFinish(o, deps) {
   const { root, cwd, env, exec, quiet } = deps
   assertEnv(exec, root, cwd, env, quiet)
@@ -1562,53 +1578,17 @@ export function cmdFinish(o, deps) {
     }
   }
 
-  // Deterministic checklist before first/fix push (patch coverage stays in pnpm check / pre-push).
-  // Under Vitest, skip unless the test injects runQualitySelfCheck (keeps finish unit tests focused).
-  const inVitest =
-    env.VITEST === 'true' ||
-    env.VITEST === '1' ||
-    process.env.VITEST === 'true' ||
-    process.env.VITEST === '1'
-  const selfCheck =
-    deps.runQualitySelfCheck ?? (inVitest ? () => 0 : runQualitySelfCheck)
-  const selfLines = []
-  const bodyPath = o['body-file']
-    ? path.resolve(cwd, o['body-file'])
-    : undefined
-  const selfCode = selfCheck({
-    root,
-    bodyPath: bodyPath && fs.existsSync(bodyPath) ? bodyPath : undefined,
-    changeSlug: slugFromBranch(branch),
-    write: (s) => selfLines.push(String(s).replace(/\n$/, '')),
-  })
-  if (selfCode !== 0) {
-    return {
-      ok: false,
-      stage: 'self-check',
-      pushAttempts: prior,
-      branch,
-      ahead,
-      summary: selfLines.join('\n') || 'quality:self-check failed',
-    }
-  }
+  // Thin finish: push + PR only. Stage-11 stamp gates skip-A messaging; never
+  // re-run quality:self-check / integrity from finish. No happy-path main merge.
+  const stampCurrent = (
+    deps.isGreenTreeStampCurrent ??
+    ((r) => isGreenTreeStampCurrent(r, { exec, cwd, env }))
+  )(root)
+  const stampNote = stampCurrent
+    ? 'green-tree stamp current (A/C1/C2 ritual already stamped); '
+    : 'warning: stage-11 green-tree stamp missing or stale (finish is thin; checks not re-run); '
 
-  // Merge origin/main when HEAD is behind before push; on non-FF reject, merge and retry once.
-  try {
-    mergeOriginMainIfNeeded(exec, root, cwd, env, quiet)
-  } catch (e) {
-    if (!(e instanceof AgentError)) throw e
-    const next = prior + 1
-    writePushFailures(root, { ...fails, [branch]: next }, exec)
-    return {
-      ok: false,
-      stage: 'push',
-      pushAttempts: next,
-      branch,
-      ahead,
-      summary: e.message,
-    }
-  }
-  let lastPush = sh(exec, cwd, env, quiet, 'git', [
+  const lastPush = sh(exec, cwd, env, quiet, 'git', [
     'push',
     '-q',
     '-u',
@@ -1622,27 +1602,16 @@ export function cmdFinish(o, deps) {
       pushMsg,
     )
   ) {
-    try {
-      mergeOriginMainIfNeeded(exec, root, cwd, env, quiet)
-      lastPush = sh(exec, cwd, env, quiet, 'git', [
-        'push',
-        '-q',
-        '-u',
-        'origin',
-        'HEAD',
-      ])
-    } catch (e) {
-      if (!(e instanceof AgentError)) throw e
-      const next = prior + 1
-      writePushFailures(root, { ...fails, [branch]: next }, exec)
-      return {
-        ok: false,
-        stage: 'push',
-        pushAttempts: next,
-        branch,
-        ahead,
-        summary: e.message,
-      }
+    const next = prior + 1
+    writePushFailures(root, { ...fails, [branch]: next }, exec)
+    return {
+      ok: false,
+      stage: 'push',
+      pushAttempts: next,
+      branch,
+      ahead,
+      stampCurrent,
+      summary: `${stampNote}push rejected (non-fast-forward). Finish does not merge origin/main; orchestrator should refresh/rebase, then re-run finish.\n${summarizePushFailure(lastPush.stdout, lastPush.stderr)}`,
     }
   }
   if (lastPush.code !== 0) {
@@ -1654,7 +1623,8 @@ export function cmdFinish(o, deps) {
       pushAttempts: next,
       branch,
       ahead,
-      summary: summarizePushFailure(lastPush.stdout, lastPush.stderr),
+      stampCurrent,
+      summary: `${stampNote}${summarizePushFailure(lastPush.stdout, lastPush.stderr)}`,
     }
   }
   if (fails[branch] !== undefined) {
@@ -1721,12 +1691,13 @@ export function cmdFinish(o, deps) {
     ahead,
     prUrl,
     created,
+    stampCurrent,
     metrics: metrics
       ? { wallTimeSec: metrics.wallTimeSec, tokens: metrics.tokens }
       : null,
     summary: created
-      ? `PR created: ${prUrl}`
-      : `PR updated (existing): ${prUrl}`,
+      ? `${stampNote}PR created: ${prUrl}`
+      : `${stampNote}PR updated (existing): ${prUrl}`,
   }
 }
 
@@ -2104,6 +2075,16 @@ function fmtFinish(r) {
     `ahead: ${r.ahead}`,
     `pr: ${r.prUrl}`,
     `created: ${r.created}`,
+    `stampCurrent: ${r.stampCurrent}`,
+    `summary: ${r.summary}`,
+  ].join('\n')
+}
+
+function fmtStampGreen(r) {
+  return [
+    `ok: ${r.ok}`,
+    `stamp: ${r.stamp}`,
+    `path: ${r.path}`,
     `summary: ${r.summary}`,
   ].join('\n')
 }
@@ -2172,6 +2153,9 @@ export function run(argv, deps = {}) {
         r = cmdFinish(o, d)
         code = r.ok ? 0 : 1
         break
+      case 'stamp-green':
+        r = cmdStampGreen(o, d)
+        break
       case 'review-brief':
         r = cmdReviewBrief(o, d)
         break
@@ -2202,21 +2186,23 @@ export function run(argv, deps = {}) {
         ? fmtPreflight(r)
         : cmd === 'finish'
           ? fmtFinish(r)
-          : cmd === 'instructions'
-            ? fmtInstructions(r)
-            : cmd === 'stats'
-              ? fmtStats(r)
-              : cmd === 'size'
-                ? fmtSize(r)
-                : cmd === 'manual-qa'
-                  ? fmtManualQa(r)
-                  : cmd === 'archive'
-                    ? [
-                        `ok: ${r.ok}`,
-                        `slug: ${r.slug}`,
-                        `summary: ${r.summary}`,
-                      ].join('\n')
-                    : fmtBrief(r)
+          : cmd === 'stamp-green'
+            ? fmtStampGreen(r)
+            : cmd === 'instructions'
+              ? fmtInstructions(r)
+              : cmd === 'stats'
+                ? fmtStats(r)
+                : cmd === 'size'
+                  ? fmtSize(r)
+                  : cmd === 'manual-qa'
+                    ? fmtManualQa(r)
+                    : cmd === 'archive'
+                      ? [
+                          `ok: ${r.ok}`,
+                          `slug: ${r.slug}`,
+                          `summary: ${r.summary}`,
+                        ].join('\n')
+                      : fmtBrief(r)
     return { code, out }
   } catch (e) {
     if (!(e instanceof AgentError)) throw e

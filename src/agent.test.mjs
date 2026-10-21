@@ -168,6 +168,7 @@ const HELP_SNIPPETS = [
   'usage: pnpm agent <cmd> [--root <repo>] [--json] [--quiet]',
   'preflight [--slug S] [--skip a,b]',
   'finish --title T --body-file F',
+  'stamp-green',
   'review-brief [--change S] [--base REF] [--rules-json',
   'size [--plan]',
   'manual-qa',
@@ -345,6 +346,12 @@ describe('parsers', () => {
       'Skip openspec-planning-reviewer',
     )
     expect(PREP_APPLY_ARCHIVE_PROCEDURE).toContain('skip_specs:true')
+    expect(APPLY_ARCHIVE_PROCEDURE).toContain('No commit until first B')
+    expect(APPLY_ARCHIVE_PROCEDURE).toContain('Stage 10: PR body')
+    expect(APPLY_ARCHIVE_PROCEDURE).toContain('agent stamp-green')
+    expect(APPLY_ARCHIVE_PROCEDURE).toContain('Stage 12: agent finish')
+    expect(PREP_APPLY_ARCHIVE_PROCEDURE).toContain('No commit until first B')
+    expect(PREP_APPLY_ARCHIVE_PROCEDURE).toContain('agent stamp-green')
   })
 
   it('isPrepFastTrack false when roadmap introduces missing src/<capability>/', () => {
@@ -1858,7 +1865,8 @@ describe('finish', () => {
         'ahead: 2',
         'pr: undefined',
         'created: undefined',
-        'summary: denied',
+        'stampCurrent: false',
+        'summary: warning: stage-11 green-tree stamp missing or stale (finish is thin; checks not re-run); denied',
       ].join('\n'),
     )
   })
@@ -1923,10 +1931,68 @@ describe('finish', () => {
       calls.some(
         (c) =>
           c[0] === 'pnpm' &&
-          (c[1].includes('verify:fast:quiet') || c[1].includes('check')),
+          (c[1].includes('verify:fast:quiet') ||
+            c[1].includes('check') ||
+            c[1].includes('quality:self-check')),
       ),
     ).toBe(false)
     expect(calls.some((c) => c[1].includes('--no-verify'))).toBe(false)
+    expect(
+      calls.some(
+        (c) =>
+          c[0] === 'git' &&
+          c[1].includes('merge') &&
+          c[1].includes('origin/main'),
+      ),
+    ).toBe(false)
+    const j = JSON.parse(r.out)
+    expect(j.stampCurrent).toBe(false)
+    expect(j.summary).toContain('stage-11 green-tree stamp missing or stale')
+  })
+
+  it('finish skips ritual messaging when green-tree stamp is current', () => {
+    const root = tmpRoot(true)
+    const body = path.join(root, 'body.md')
+    fs.writeFileSync(body, 'b\n')
+    const r = run(
+      ['finish', '--json', '--root', root, '--title', 't', '--body-file', body],
+      {
+        cwd: root,
+        exec: finishBase([
+          ['git push', { code: 0 }],
+          [
+            'gh pr list --head',
+            {
+              stdout: JSON.stringify({
+                number: 1,
+                url: 'https://example.com/pr/1',
+              }),
+            },
+          ],
+        ]),
+        env: {},
+        isGreenTreeStampCurrent: () => true,
+      },
+    )
+    expect(r.code, r.err).toBe(0)
+    const j = JSON.parse(r.out)
+    expect(j.stampCurrent).toBe(true)
+    expect(j.summary).toContain('A/C1/C2 ritual already stamped')
+    expect(j.summary).not.toContain('missing or stale')
+  })
+
+  it('stamp-green writes .cache/agent-green-tree', () => {
+    const root = gitInitRepo()
+    const r = run(['stamp-green', '--json', '--root', root], {
+      cwd: root,
+      env: {},
+    })
+    expect(r.code, r.err).toBe(0)
+    const j = JSON.parse(r.out)
+    expect(j.ok).toBe(true)
+    expect(j.stamp).toMatch(/^[a-f0-9]{64}$/)
+    expect(j.path).toBe(path.join(root, '.cache', 'agent-green-tree'))
+    expect(fs.readFileSync(j.path, 'utf8').trim()).toBe(j.stamp)
   })
 
   it('one push per call and persists budget', () => {
@@ -1948,8 +2014,12 @@ describe('finish', () => {
       pushAttempts: 1,
       branch: 'feat/demo',
       ahead: 2,
-      summary: 'pre-push failed',
+      stampCurrent: false,
     })
+    expect(JSON.parse(r1.out).summary).toContain('pre-push failed')
+    expect(JSON.parse(r1.out).summary).toContain(
+      'stage-11 green-tree stamp missing or stale',
+    )
     expect(pushes).toBe(1)
 
     const r2 = run(['finish', '--json', '--root', root], {
@@ -4098,134 +4168,6 @@ describe('claimed set and merge helpers', () => {
     ).toBe(false)
   })
 
-  it('finish records push failure when mergeOriginMainIfNeeded throws AgentError', () => {
-    const root = tmpRoot(true)
-    const body = path.join(root, 'body.md')
-    fs.writeFileSync(body, 'b\n')
-    const r = run(
-      ['finish', '--json', '--root', root, '--title', 't', '--body-file', body],
-      {
-        cwd: root,
-        exec: fakeExec([
-          ...envOk,
-          ['git status --porcelain', { stdout: '' }],
-          ['git branch --show-current', { stdout: 'feat/demo\n' }],
-          ['git rev-list', { stdout: '1\n' }],
-
-          ['git fetch origin', { code: 0 }],
-          ['git merge-base --is-ancestor', { code: 1 }],
-          ['git merge origin/main', { code: 1, stderr: 'conflict\n' }],
-          ['git diff --name-only --diff-filter=U', { stdout: 'src/app.ts\n' }],
-        ]),
-        env: {},
-      },
-    )
-    expect(r.code).toBe(1)
-    const j = JSON.parse(r.out)
-    expect(j.ok).toBe(false)
-    expect(j.stage).toBe('push')
-    expect(j.pushAttempts).toBe(1)
-    expect(j.summary).toMatch(/Resolve per git-finish\.mdc/)
-    expect(readPushFailures(root)).toEqual({ 'feat/demo': 1 })
-  })
-
-  it('finish records push failure when non-FF merge retry throws AgentError', () => {
-    const root = tmpRoot(true)
-    const body = path.join(root, 'body.md')
-    fs.writeFileSync(body, 'b\n')
-    let pushes = 0
-    const exec = (file, args) => {
-      const key = `${file} ${args.join(' ')}`
-      if (key.includes('node -v'))
-        return { code: 0, stdout: 'v22.0.0\n', stderr: '' }
-      if (key.includes('command -v pnpm'))
-        return { code: 0, stdout: '', stderr: '' }
-      if (key.includes('git status --porcelain'))
-        return { code: 0, stdout: '', stderr: '' }
-      if (key.includes('git branch --show-current'))
-        return { code: 0, stdout: 'feat/demo\n', stderr: '' }
-      if (key.includes('git rev-list'))
-        return { code: 0, stdout: '1\n', stderr: '' }
-
-      if (key.includes('git fetch')) return { code: 0, stdout: '', stderr: '' }
-      if (key.includes('git merge-base --is-ancestor')) {
-        // First mergeOriginMainIfNeeded: already based; second (after reject): not
-        return pushes === 0
-          ? { code: 0, stdout: '', stderr: '' }
-          : { code: 1, stdout: '', stderr: '' }
-      }
-      if (key.includes('git merge origin/main'))
-        return { code: 1, stderr: 'conflict\n', stdout: '' }
-      if (key.includes('git diff --name-only --diff-filter=U'))
-        return { code: 0, stdout: 'src/app.ts\n', stderr: '' }
-      if (key.includes('git rev-parse --git-path'))
-        return {
-          code: 0,
-          stdout: '.git/agent-finish-push-failures.json\n',
-          stderr: '',
-        }
-      if (key.includes('git push')) {
-        pushes++
-        return {
-          code: 1,
-          stdout: '',
-          stderr: '! [rejected] non-fast-forward\n',
-        }
-      }
-      return { code: 1, stdout: '', stderr: `unhandled ${key}` }
-    }
-    const r = run(
-      ['finish', '--json', '--root', root, '--title', 't', '--body-file', body],
-      { cwd: root, exec, env: {} },
-    )
-    expect(r.code).toBe(1)
-    const j = JSON.parse(r.out)
-    expect(j.ok).toBe(false)
-    expect(j.stage).toBe('push')
-    expect(j.pushAttempts).toBe(1)
-    expect(j.summary).toMatch(/Resolve per git-finish\.mdc/)
-  })
-
-  it('finish rethrows non-AgentError from mergeOriginMainIfNeeded', () => {
-    const root = tmpRoot(true)
-    const body = path.join(root, 'body.md')
-    fs.writeFileSync(body, 'b\n')
-    expect(() =>
-      run(
-        [
-          'finish',
-          '--json',
-          '--root',
-          root,
-          '--title',
-          't',
-          '--body-file',
-          body,
-        ],
-        {
-          cwd: root,
-          exec: (file, args) => {
-            const key = `${file} ${args.join(' ')}`
-            if (key.includes('node -v'))
-              return { code: 0, stdout: 'v22.0.0\n', stderr: '' }
-            if (key.includes('command -v pnpm'))
-              return { code: 0, stdout: '', stderr: '' }
-            if (key.includes('git status --porcelain'))
-              return { code: 0, stdout: '', stderr: '' }
-            if (key.includes('git branch --show-current'))
-              return { code: 0, stdout: 'feat/demo\n', stderr: '' }
-            if (key.includes('git rev-list'))
-              return { code: 0, stdout: '1\n', stderr: '' }
-
-            if (key.includes('git fetch')) throw new TypeError('boom-fetch')
-            return { code: 1, stdout: '', stderr: `unhandled ${key}` }
-          },
-          env: {},
-        },
-      ),
-    ).toThrow(TypeError)
-  })
-
   it('mergeOriginMainIfNeeded refuses empty unmerged file list', () => {
     const root = tmpRoot(true)
     expect(() =>
@@ -4244,12 +4186,12 @@ describe('claimed set and merge helpers', () => {
     ).toThrow(/files: unknown/)
   })
 
-  it('finish merges before push when origin/main is not an ancestor', () => {
+  it('finish does not merge origin/main before push', () => {
     const root = tmpRoot(true)
     const body = path.join(root, 'body.md')
     fs.writeFileSync(body, 'b\n')
     let merged = false
-    const exec = (file, args, opts) => {
+    const exec = (file, args) => {
       const key = `${file} ${args.join(' ')}`
       if (key.includes('node -v'))
         return { code: 0, stdout: 'v22.0.0\n', stderr: '' }
@@ -4261,10 +4203,6 @@ describe('claimed set and merge helpers', () => {
         return { code: 0, stdout: 'feat/demo\n', stderr: '' }
       if (key.includes('git rev-list'))
         return { code: 0, stdout: '1\n', stderr: '' }
-
-      if (key.includes('git fetch')) return { code: 0, stdout: '', stderr: '' }
-      if (key.includes('git merge-base --is-ancestor'))
-        return { code: 1, stdout: '', stderr: '' }
       if (key.includes('git merge origin/main')) {
         merged = true
         return { code: 0, stdout: '', stderr: '' }
@@ -4292,57 +4230,47 @@ describe('claimed set and merge helpers', () => {
       { cwd: root, exec, env: {} },
     )
     expect(r.code, r.err).toBe(0)
-    expect(merged).toBe(true)
+    expect(merged).toBe(false)
     expect(JSON.parse(r.out).ok).toBe(true)
   })
 
-  it('finish merges on non-fast-forward reject then pushes', () => {
+  it('finish fails on non-fast-forward without merging origin/main', () => {
     const root = tmpRoot(true)
     const body = path.join(root, 'body.md')
     fs.writeFileSync(body, 'b\n')
-    const base = fakeExec([
-      ...envOk,
-      ['git status --porcelain', { stdout: '' }],
-      ['git branch --show-current', { stdout: 'feat/demo\n' }],
-      ['git rev-list --count origin/main..HEAD', { stdout: '1\n' }],
-
-      ['git fetch origin', { code: 0 }],
-    ])
+    let mergeCalls = 0
     let pushCount = 0
-    let ancestorCalls = 0
     const wrapped = (file, args, opts) => {
       const key = `${file} ${args.join(' ')}`
       if (key.includes('git push')) {
         pushCount++
-        if (pushCount === 1)
-          return { code: 1, stderr: 'updates were rejected\n', stdout: '' }
+        return { code: 1, stderr: 'updates were rejected\n', stdout: '' }
+      }
+      if (key.includes('git merge origin/main')) {
+        mergeCalls++
         return { code: 0, stdout: '', stderr: '' }
       }
-      if (key.includes('git merge-base --is-ancestor')) {
-        ancestorCalls++
-        // First finish merge check: already ancestor; after reject: need merge.
-        return { code: ancestorCalls === 1 ? 0 : 1, stdout: '', stderr: '' }
-      }
-      if (key.includes('git merge origin/main'))
-        return { code: 0, stdout: '', stderr: '' }
-      if (key.includes('gh pr list'))
-        return {
-          code: 0,
-          stdout: JSON.stringify({
-            number: 1,
-            url: 'https://example.com/pr/1',
-          }),
-          stderr: '',
-        }
-      return base(file, args, opts)
+      return fakeExec([
+        ...envOk,
+        ['git status --porcelain', { stdout: '' }],
+        ['git branch --show-current', { stdout: 'feat/demo\n' }],
+        ['git rev-list --count origin/main..HEAD', { stdout: '1\n' }],
+      ])(file, args, opts)
     }
     const r = run(
       ['finish', '--json', '--root', root, '--title', 't', '--body-file', body],
       { cwd: root, exec: wrapped, env: {} },
     )
-    expect(r.code, r.err).toBe(0)
-    expect(pushCount).toBe(2)
-    expect(JSON.parse(r.out).ok).toBe(true)
+    expect(r.code).toBe(1)
+    expect(pushCount).toBe(1)
+    expect(mergeCalls).toBe(0)
+    const j = JSON.parse(r.out)
+    expect(j.ok).toBe(false)
+    expect(j.stage).toBe('push')
+    expect(j.pushAttempts).toBe(1)
+    expect(j.summary).toMatch(/Finish does not merge origin\/main/)
+    expect(j.summary).toMatch(/orchestrator should refresh\/rebase/)
+    expect(readPushFailures(root)).toEqual({ 'feat/demo': 1 })
   })
 })
 
