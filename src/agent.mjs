@@ -172,7 +172,7 @@ const HELP = `usage: pnpm agent <cmd> [--root <repo>] [--json] [--quiet]
   manual-qa [--change S] [--base-url U]   headless Playwright smoke (composer-2.5 subagent)
   instructions <artifact> [--change S]   template + rules for one artifact
   stats <path>   per-round tokens; exit 1 if peak>300K or first input>400K
-  archive [--change S]   move openspec/changes/<slug> → archive/YYYY-MM-DD-<slug>
+  archive [--change S]   remove openspec/changes/<slug> (default; git history + specs/ are SoT)
   help
 
 Requires POSIX shell, Node matching .nvmrc, and pnpm/gh/git on PATH
@@ -1233,9 +1233,9 @@ export function summarizePushFailure(stdout, stderr) {
 }
 
 /**
- * When the current branch is behind origin/main, warn and merge-or-recreate
- * (never rebase/force). Recreate = ff-only onto origin/main when there are no
- * unique commits; otherwise merge with the finish allowlist.
+ * When the current branch is behind origin/main: ff-only recreate if there are
+ * no unique commits; otherwise warn only (no happy-path merge — parallel agents /
+ * behind-without-conflicts is OK for PR create). Never rebase/force.
  * @returns {{ stale: boolean, warning: string | null, merged: boolean, action: string | null }}
  */
 export function refreshStaleFeatureBranch(exec, root, cwd, env, quiet) {
@@ -1281,13 +1281,12 @@ export function refreshStaleFeatureBranch(exec, root, cwd, env, quiet) {
     )
     return { stale: true, warning, merged: true, action: 'recreate-ff' }
   }
-  const warning = `branch tip is behind origin/main by ${behind} commit(s); merging origin/main (no rebase/force)`
-  const result = mergeOriginMainIfNeeded(exec, root, cwd, env, quiet)
+  const warning = `branch tip is behind origin/main by ${behind} commit(s) with unique commits; not merging (happy path). Orchestrator refreshes on conflict after sibling merges.`
   return {
     stale: true,
     warning,
-    merged: Boolean(result?.merged),
-    action: 'merge',
+    merged: false,
+    action: null,
   }
 }
 
@@ -1601,23 +1600,25 @@ export function cmdFinish(o, deps) {
     }
   }
 
-  // Thin finish: push + PR only. Stage-11 stamp gates skip-A messaging; never
-  // re-run quality:self-check / integrity from finish. No happy-path main merge.
+  // Thin finish: push + PR only. Stage-11 stamp + AGENT_THIN_FINISH let
+  // ts-rig-ci hook-pre-push skip A+C1; finish never re-runs self-check /
+  // integrity and never merges origin/main on the happy path.
   const stampCurrent = (
     deps.isGreenTreeStampCurrent ??
     ((r) => isGreenTreeStampCurrent(r, { exec, cwd, env }))
   )(root)
   const stampNote = stampCurrent
     ? 'green-tree stamp current (A/C1/C2 ritual already stamped); '
-    : 'warning: stage-11 green-tree stamp missing or stale (finish is thin; checks not re-run); '
+    : 'warning: stage-11 green-tree stamp missing or stale (finish is thin; pre-push still runs A+C1 unless stamp matches); '
 
+  const pushEnv = { ...env, AGENT_THIN_FINISH: '1' }
   const lastPush = sh(exec, cwd, env, quiet, 'git', [
     'push',
     '-q',
     '-u',
     'origin',
     'HEAD',
-  ])
+  ], { env: pushEnv })
   const pushMsg = `${lastPush.stdout}\n${lastPush.stderr}`
   if (
     lastPush.code !== 0 &&

@@ -16,6 +16,8 @@ Host repos configure thresholds and check inventories in `quality/gates.json` an
 
 `ts-rig-check` / `pnpm check` defaults to the **fast** inventory (A): `checks.core` minus integrity members (`openspec-budget`, `codecov-yml`, `roadmap`), with `afterUnit` minus `stryker-diff`. Pass `--inventory integrity` (or `CHECK_INVENTORY=integrity`) for C1-only gates; `--inventory core` keeps the legacy full core+afterUnit wave. Hosts may set explicit `checks.fast` / `checks.integrity` arrays in `quality/gates.json`.
 
+Lefthook pre-push: `ts-rig-ci hook-pre-push` runs `pnpm check:integrity && pnpm check:fast`, except when `AGENT_THIN_FINISH=1` (set by `agent finish` on `git push`) **and** the stage-11 green-tree stamp is current — then it skips both. Hand-push never sets that env, so it always pays A+C1. Never use `--no-verify`.
+
 ## Programmatic
 
 ```js

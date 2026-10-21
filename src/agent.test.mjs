@@ -1348,7 +1348,7 @@ describe('preflight', () => {
     expect(behindIdx).toBeGreaterThan(fetchIdx)
   })
 
-  it('flags stale branch behind origin/main and merges when ahead', () => {
+  it('flags stale branch behind origin/main without merging when ahead', () => {
     const root = tmpRoot()
     fs.mkdirSync(path.join(root, 'openspec', 'changes', 'stale-item'), {
       recursive: true,
@@ -1378,12 +1378,6 @@ describe('preflight', () => {
         ['git rev-list --count HEAD..origin/main', { stdout: '2\n' }],
         ['git rev-list --count origin/main..HEAD', { stdout: '1\n' }],
         [
-          'git merge-base --is-ancestor',
-          () => {
-            return { code: 1, stdout: '', stderr: '' }
-          },
-        ],
-        [
           'git merge origin/main',
           () => {
             merged = true
@@ -1403,7 +1397,8 @@ describe('preflight', () => {
     const j = JSON.parse(r.out)
     expect(j.stale).toBe(true)
     expect(j.staleWarning).toMatch(/behind origin\/main/)
-    expect(merged).toBe(true)
+    expect(j.staleWarning).toMatch(/not merging/)
+    expect(merged).toBe(false)
 
     const text = run(['preflight', '--root', root], {
       cwd: root,
@@ -1419,8 +1414,6 @@ describe('preflight', () => {
         ['git switch -c feat/stale-item', { code: 0 }],
         ['git rev-list --count HEAD..origin/main', { stdout: '2\n' }],
         ['git rev-list --count origin/main..HEAD', { stdout: '1\n' }],
-        ['git merge-base --is-ancestor', { code: 1 }],
-        ['git merge origin/main', { code: 0 }],
         [
           'openspec instructions proposal',
           { stdout: JSON.stringify({ template: '# T', rules: ['r'] }) },
@@ -1430,6 +1423,7 @@ describe('preflight', () => {
     })
     expect(text.code, text.err).toBe(0)
     expect(text.out).toMatch(/staleWarning:.*behind origin\/main/)
+    expect(text.out).toMatch(/not merging/)
   })
 
   it('emits checklist ids when quality/review-checklist.md exists', () => {
@@ -1719,14 +1713,12 @@ describe('summarizePushFailure / refreshStaleFeatureBranch', () => {
     expect(r.warning).toMatch(/recreating/)
   })
 
-  it('refreshStaleFeatureBranch merges when ahead > 0', () => {
+  it('refreshStaleFeatureBranch warns without merging when ahead > 0', () => {
     let merged = false
     const r = refreshStaleFeatureBranch(
       fakeExec([
         ['git rev-list --count HEAD..origin/main', { stdout: '2\n' }],
         ['git rev-list --count origin/main..HEAD', { stdout: '4\n' }],
-        ['git fetch origin', { code: 0 }],
-        ['git merge-base --is-ancestor', { code: 1 }],
         [
           'git merge origin/main',
           () => {
@@ -1740,9 +1732,11 @@ describe('summarizePushFailure / refreshStaleFeatureBranch', () => {
       {},
       true,
     )
-    expect(merged).toBe(true)
-    expect(r.action).toBe('merge')
+    expect(merged).toBe(false)
+    expect(r.merged).toBe(false)
+    expect(r.action).toBe(null)
     expect(r.stale).toBe(true)
+    expect(r.warning).toMatch(/not merging/)
   })
 })
 
@@ -1866,7 +1860,7 @@ describe('finish', () => {
         'pr: undefined',
         'created: undefined',
         'stampCurrent: false',
-        'summary: warning: stage-11 green-tree stamp missing or stale (finish is thin; checks not re-run); denied',
+        'summary: warning: stage-11 green-tree stamp missing or stale (finish is thin; pre-push still runs A+C1 unless stamp matches); denied',
       ].join('\n'),
     )
   })
@@ -1903,6 +1897,8 @@ describe('finish', () => {
     const body = path.join(root, 'body.md')
     fs.writeFileSync(body, 'b\n')
     const calls = []
+    /** @type {NodeJS.ProcessEnv | undefined} */
+    let pushEnv
     const base = finishBase([
       ['git push', { code: 0 }],
       [
@@ -1921,6 +1917,7 @@ describe('finish', () => {
         cwd: root,
         exec: (file, args, opts) => {
           calls.push([file, [...args]])
+          if (file === 'git' && args[0] === 'push') pushEnv = opts?.env
           return base(file, args, opts)
         },
         env: {},
@@ -1945,6 +1942,7 @@ describe('finish', () => {
           c[1].includes('origin/main'),
       ),
     ).toBe(false)
+    expect(pushEnv?.AGENT_THIN_FINISH).toBe('1')
     const j = JSON.parse(r.out)
     expect(j.stampCurrent).toBe(false)
     expect(j.summary).toContain('stage-11 green-tree stamp missing or stale')
