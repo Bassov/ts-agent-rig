@@ -49,6 +49,31 @@ describe('check-pr-body', () => {
     expect(isSectionNonEmpty('<!-- only -->\n')).toBe(false)
   })
 
+  it('treats bare N/A as a filled section (e.g. Metrics when not applicable)', () => {
+    expect(isSectionNonEmpty('N/A\n')).toBe(true)
+    expect(isSectionNonEmpty('n/a\n')).toBe(true)
+    expect(isSectionNonEmpty('-\n')).toBe(false)
+    const naMetrics = `## Summary
+
+- docs cleanup
+
+## OpenSpec
+
+- Change: N/A
+
+## Manual test scenarios
+
+1. N/A (non-UI)
+
+## Metrics
+
+N/A
+`
+    expect(checkPrBody({ body: naMetrics, templateText: template }).ok).toBe(
+      true,
+    )
+  })
+
   it('requires non-empty template sections and rejects fix/revise', () => {
     const good = `## Summary
 
@@ -80,6 +105,11 @@ describe('check-pr-body', () => {
     expect(findFixReviseVerdicts('Verdict: fix — gates')).toEqual([
       'Verdict: fix — gates',
     ])
+    expect(
+      findFixReviseVerdicts(
+        '- Trim spread-view; fix stale wording on project-session-mutation.',
+      ),
+    ).toEqual([])
     const badVerdict = checkPrBody({
       body: `${good}\n\n## Reviewer verdicts\n\n- Verdict: revise\n`,
       templateText: template,

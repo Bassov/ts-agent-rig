@@ -53,7 +53,7 @@ export function isSectionNonEmpty(body) {
   return stripHtmlComments(body)
     .split('\n')
     .map((l) => l.trim())
-    .some((l) => l.length > 0 && l !== '-' && l !== '*' && !/^N\/A$/i.test(l))
+    .some((l) => l.length > 0 && l !== '-' && l !== '*')
 }
 
 export function findFixReviseVerdicts(body) {
@@ -62,10 +62,9 @@ export function findFixReviseVerdicts(body) {
   for (const raw of String(body ?? '').split('\n')) {
     const line = raw.trim()
     if (!line) continue
+    // Require an explicit verdict marker — plain bullets may say "fix" in prose.
     if (
-      (/\bverdict\b/i.test(line) ||
-        /^[-*]\s+/.test(line) ||
-        /^Verdict:/i.test(line)) &&
+      (/\bverdict\b/i.test(line) || /^Verdict:/i.test(line)) &&
       /\b(fix|revise)\b/i.test(line)
     ) {
       hits.push(line)
