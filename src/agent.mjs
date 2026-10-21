@@ -21,6 +21,7 @@ import {
   loadNativeArtifactInstructions,
   openSpecChangeStatus,
 } from './openspec-native.mjs'
+import { CiBriefError, runCiBrief } from './ci-brief.mjs'
 
 const nodeRequire = createRequire(import.meta.url)
 
@@ -56,7 +57,7 @@ export function tailOutput(stdout, stderr, n = 60) {
   return lines.slice(-n).join('\n')
 }
 
-const BOOL = new Set(['json', 'quiet', 'help', 'plan'])
+const BOOL = new Set(['json', 'quiet', 'help', 'plan', 'watch'])
 const VALUE = new Set([
   'root',
   'change',
@@ -68,6 +69,7 @@ const VALUE = new Set([
   'base',
   'out',
   'base-url',
+  'pr',
 ])
 
 /** ≤10-line apply/archive procedure embedded in the preflight run card. */
@@ -164,6 +166,7 @@ const HELP = `usage: pnpm agent <cmd> [--root <repo>] [--json] [--quiet]
   preflight [--slug S] [--skip a,b]   env + roadmap next (+ branch from origin/main); run card
   finish --title T --body-file F   thin push+PR (≤2/branch; no main merge; warn if stamp stale)
   stamp-green   write .cache/agent-green-tree (stage 11 after integrity+self-check)
+  ci-brief [--pr N] [--watch]   thin CI failure brief (annotations; stage 13)
   review-brief [--change S] [--base REF] [--rules-json '[…]'] [--out FILE]   reviewer brief
   size [--plan] [--change S]   plan estimate / merge-base..HEAD changed lines
   manual-qa [--change S] [--base-url U]   headless Playwright smoke (composer-2.5 subagent)
@@ -1557,6 +1560,26 @@ export function cmdStampGreen(_o, deps) {
   }
 }
 
+export function cmdCiBrief(o, deps) {
+  const { root, cwd, env, exec, quiet } = deps
+  try {
+    return runCiBrief({
+      exec,
+      root,
+      cwd,
+      env,
+      quiet,
+      pr: o.pr,
+      watch: !!o.watch,
+      sleep: deps.sleep,
+      now: deps.now,
+    })
+  } catch (e) {
+    if (e instanceof CiBriefError) fail(e.message, e.exitCode)
+    throw e
+  }
+}
+
 export function cmdFinish(o, deps) {
   const { root, cwd, env, exec, quiet } = deps
   assertEnv(exec, root, cwd, env, quiet)
@@ -2089,6 +2112,26 @@ function fmtStampGreen(r) {
   ].join('\n')
 }
 
+function fmtCiBrief(r) {
+  const lines = [
+    `ok: ${r.ok}`,
+    `pr: ${r.pr}`,
+    `summary: ${r.summary}`,
+  ]
+  for (const f of r.failures ?? []) {
+    lines.push(
+      `FAIL ${f.name} (${f.conclusion})${f.url ? ` ${f.url}` : ''}`.trimEnd(),
+    )
+    for (const a of f.annotations ?? []) {
+      const loc = a.path
+        ? `${a.path}${a.line != null ? `:${a.line}` : ''}`
+        : ''
+      lines.push(`  ${loc}${loc && a.message ? ' ' : ''}${a.message}`.trimEnd())
+    }
+  }
+  return lines.join('\n')
+}
+
 function fmtBrief(r) {
   return [
     `slug: ${r.slug}`,
@@ -2156,6 +2199,10 @@ export function run(argv, deps = {}) {
       case 'stamp-green':
         r = cmdStampGreen(o, d)
         break
+      case 'ci-brief':
+        r = cmdCiBrief(o, d)
+        code = r.ok ? 0 : 1
+        break
       case 'review-brief':
         r = cmdReviewBrief(o, d)
         break
@@ -2188,21 +2235,23 @@ export function run(argv, deps = {}) {
           ? fmtFinish(r)
           : cmd === 'stamp-green'
             ? fmtStampGreen(r)
-            : cmd === 'instructions'
-              ? fmtInstructions(r)
-              : cmd === 'stats'
-                ? fmtStats(r)
-                : cmd === 'size'
-                  ? fmtSize(r)
-                  : cmd === 'manual-qa'
-                    ? fmtManualQa(r)
-                    : cmd === 'archive'
-                      ? [
-                          `ok: ${r.ok}`,
-                          `slug: ${r.slug}`,
-                          `summary: ${r.summary}`,
-                        ].join('\n')
-                      : fmtBrief(r)
+            : cmd === 'ci-brief'
+              ? fmtCiBrief(r)
+              : cmd === 'instructions'
+                ? fmtInstructions(r)
+                : cmd === 'stats'
+                  ? fmtStats(r)
+                  : cmd === 'size'
+                    ? fmtSize(r)
+                    : cmd === 'manual-qa'
+                      ? fmtManualQa(r)
+                      : cmd === 'archive'
+                        ? [
+                            `ok: ${r.ok}`,
+                            `slug: ${r.slug}`,
+                            `summary: ${r.summary}`,
+                          ].join('\n')
+                        : fmtBrief(r)
     return { code, out }
   } catch (e) {
     if (!(e instanceof AgentError)) throw e
