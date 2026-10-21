@@ -4,6 +4,8 @@ Agent pipeline, roadmap CLI, and quality-gate harness for TypeScript / pnpm repo
 
 Host repos configure thresholds and check inventories in `quality/gates.json` and OpenSpec in `openspec/config.yaml`. The rig resolves the host root via `process.cwd()` / `quality/gates.json` walk / `git rev-parse` (override with `TS_RIG_REPO_ROOT`).
 
+Host procedural SoT for the agent loop (stages, A/B/C, commit rules, stamp, thin finish) is `docs/agent-loop.md`. Preflight run-card APPLY/PREP procedures point there instead of inlining finish/stamp recipes.
+
 ## Binaries
 
 | Binary | Role |
