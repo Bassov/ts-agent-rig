@@ -259,11 +259,31 @@ describe('main', () => {
           return []
         },
         listSources: () => [],
+        flakyPaths: [],
         write: () => {},
       },
     )
     expect(code).toBe(0)
     expect(seen.some((line) => line.includes('origin/main'))).toBe(true)
+  })
+
+  it('uses STRYKER_DIFF_BASE when set (phase SHA)', () => {
+    const seen = []
+    const code = main(
+      { STRYKER_DIFF_BASE: 'phase-sha' },
+      {
+        gitLines: (args) => {
+          seen.push(args.join(' '))
+          return []
+        },
+        listSources: () => [],
+        flakyPaths: [],
+        write: () => {},
+      },
+    )
+    expect(code).toBe(0)
+    expect(seen.some((line) => line.includes('phase-sha'))).toBe(true)
+    expect(seen.some((line) => line.includes('origin/main'))).toBe(false)
   })
 
   it('default write/error hit process stdio when io omits them', () => {

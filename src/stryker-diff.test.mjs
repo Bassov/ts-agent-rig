@@ -86,6 +86,14 @@ describe('stryker-diff-gate helpers', () => {
     expect(src).toContain('load-gates')
   })
 
+  it('resolves scoring base via STRYKER_DIFF_BASE then origin/main', () => {
+    const src = readFileSync(
+      new URL('./stryker-diff.mjs', import.meta.url),
+      'utf8',
+    )
+    expect(src).toMatch(/env\.STRYKER_DIFF_BASE\s*\?\?\s*'origin\/main'/)
+  })
+
   it('docs-only change plans skip', () => {
     const plan = planDiffMutation(['docs/readme.md'], PATTERNS, TEMP)
     expect(plan.skip).toBe(true)

@@ -89,4 +89,56 @@ describe('check-patch-coverage', () => {
     expect(result.percent).toBe(0)
     expect(result.uncovered[0]?.lines).toEqual([1, 2])
   })
+
+  it('prefers STRYKER_DIFF_BASE over GATE_RATCHET_BASE when resolving base', () => {
+    /** @type {string[]} */
+    const diffs = []
+    const result = computePatchCoverage({
+      env: {
+        STRYKER_DIFF_BASE: 'phase-sha',
+        GATE_RATCHET_BASE: 'ratchet-base',
+      },
+      git: (args) => {
+        if (args[0] === 'diff') {
+          diffs.push(args.join(' '))
+          return {
+            status: 0,
+            stdout: '+++ b/src/lib/x.ts\n@@ -0,0 +1,1 @@\n+a\n',
+            stderr: '',
+          }
+        }
+        return { status: 1, stdout: '', stderr: '' }
+      },
+      lcovText: 'SF:src/lib/x.ts\nDA:1,1\nend_of_record\n',
+      loadGatesFn: () => ({ coverage: { patch: 85 } }),
+    })
+    expect(result.ok).toBe(true)
+    expect(diffs.some((line) => line.includes('phase-sha...HEAD'))).toBe(true)
+    expect(diffs.some((line) => line.includes('ratchet-base'))).toBe(false)
+  })
+
+  it('falls back to GATE_RATCHET_BASE when STRYKER_DIFF_BASE is empty', () => {
+    /** @type {string[]} */
+    const diffs = []
+    const result = computePatchCoverage({
+      env: { STRYKER_DIFF_BASE: '  ', GATE_RATCHET_BASE: 'ratchet-base' },
+      git: (args) => {
+        if (args[0] === 'diff') {
+          diffs.push(args.join(' '))
+          return {
+            status: 0,
+            stdout: '+++ b/src/lib/x.ts\n@@ -0,0 +1,1 @@\n+a\n',
+            stderr: '',
+          }
+        }
+        return { status: 1, stdout: '', stderr: '' }
+      },
+      lcovText: 'SF:src/lib/x.ts\nDA:1,1\nend_of_record\n',
+      loadGatesFn: () => ({ coverage: { patch: 85 } }),
+    })
+    expect(result.ok).toBe(true)
+    expect(diffs.some((line) => line.includes('ratchet-base...HEAD'))).toBe(
+      true,
+    )
+  })
 })
