@@ -8,8 +8,13 @@ import {
   bootCli,
   buildAfterUnitInventory,
   buildInventory,
+  deriveFastAfterUnit,
+  deriveFastCore,
+  deriveIntegrityChecks,
   resolveCheckTables,
+  resolveInventoryMode,
   DEFAULT_CORE_CHECKS,
+  INTEGRITY_CHECK_NAMES,
   extractProblemLines,
   formatCheckResult,
   isNoiseLine,
@@ -178,7 +183,7 @@ describe('isNoiseLine / bootCli', () => {
 })
 
 describe('buildInventory', () => {
-  it('always schedules the core deterministic inventory', () => {
+  it('defaults to the fast inventory (core minus integrity)', () => {
     const inv = buildInventory('/tmp/none', {
       existsSync: () => false,
       loadGatesFn: () => {
@@ -186,8 +191,11 @@ describe('buildInventory', () => {
       },
     })
     expect(inv.map((c) => c.name)).toEqual(
-      DEFAULT_CORE_CHECKS.map((c) => c.name),
+      deriveFastCore([...DEFAULT_CORE_CHECKS]).map((c) => c.name),
     )
+    for (const name of INTEGRITY_CHECK_NAMES) {
+      expect(inv.map((c) => c.name)).not.toContain(name)
+    }
   })
 
   it('includes optional policy scripts only when present', () => {
@@ -215,17 +223,27 @@ describe('buildInventory', () => {
     ])
   })
 
-  it('resolveCheckTables prefers gates.json checks.core', () => {
+  it('resolveCheckTables prefers gates.json checks.core and derives fast/integrity', () => {
     const tables = resolveCheckTables('/repo', {
       loadGatesFn: () => ({
         checks: {
-          core: [{ name: 'lint', argv: ['pnpm', 'lint'] }],
+          core: [
+            { name: 'lint', argv: ['pnpm', 'lint'] },
+            { name: 'roadmap', argv: ['pnpm', '-s', 'roadmap', 'check'] },
+          ],
           afterUnit: [],
           optional: [],
         },
       }),
     })
-    expect(tables.core).toEqual([{ name: 'lint', argv: ['pnpm', 'lint'] }])
+    expect(tables.core).toEqual([
+      { name: 'lint', argv: ['pnpm', 'lint'] },
+      { name: 'roadmap', argv: ['pnpm', '-s', 'roadmap', 'check'] },
+    ])
+    expect(tables.fast).toEqual([{ name: 'lint', argv: ['pnpm', 'lint'] }])
+    expect(tables.integrity).toEqual([
+      { name: 'roadmap', argv: ['pnpm', '-s', 'roadmap', 'check'] },
+    ])
   })
 
   it('normalizeCheckRow paths via resolveCheckTables drop invalid rows', () => {
@@ -303,6 +321,168 @@ describe('buildInventory', () => {
   })
 })
 
+describe('check inventory modes', () => {
+  const fatGates = () => ({
+    checks: {
+      core: [
+        { name: 'lint', argv: ['pnpm', 'lint'] },
+        { name: 'openspec-budget', argv: ['pnpm', 'openspec-budget'] },
+        { name: 'codecov-yml', argv: ['pnpm', 'codecov-yml'] },
+        { name: 'roadmap', argv: ['pnpm', '-s', 'roadmap', 'check'] },
+        { name: 'unit', argv: ['pnpm', 'exec', 'vitest', 'run'] },
+      ],
+      afterUnit: [
+        { name: 'patch-coverage', argv: ['pnpm', 'patch-coverage'] },
+        { name: 'stryker-diff', argv: ['pnpm', 'stryker:diff'] },
+      ],
+      optional: [],
+    },
+  })
+
+  it('resolveInventoryMode defaults to fast; flag and CHECK_INVENTORY win', () => {
+    expect(resolveInventoryMode([])).toBe('fast')
+    expect(resolveInventoryMode(['--inventory', 'integrity'])).toBe('integrity')
+    expect(resolveInventoryMode(['--inventory', 'core'])).toBe('core')
+    expect(resolveInventoryMode([], { CHECK_INVENTORY: 'integrity' })).toBe(
+      'integrity',
+    )
+    expect(resolveInventoryMode(['--inventory', 'fast'], {
+      CHECK_INVENTORY: 'integrity',
+    })).toBe('fast')
+    expect(() => resolveInventoryMode(['--inventory', 'nope'])).toThrow(
+      /usage: --inventory/,
+    )
+  })
+
+  it('derives fast/integrity when keys are missing; strips stryker-diff from fast afterUnit', () => {
+    const tables = resolveCheckTables('/repo', { loadGatesFn: fatGates })
+    expect(tables.fast.map((c) => c.name)).toEqual(['lint', 'unit'])
+    expect(tables.integrity.map((c) => c.name)).toEqual([
+      'openspec-budget',
+      'codecov-yml',
+      'roadmap',
+    ])
+    expect(deriveIntegrityChecks(tables.core).map((c) => c.name)).toEqual(
+      tables.integrity.map((c) => c.name),
+    )
+    expect(deriveFastAfterUnit(tables.afterUnit).map((c) => c.name)).toEqual([
+      'patch-coverage',
+    ])
+    const afterFast = buildAfterUnitInventory('/repo', {
+      loadGatesFn: fatGates,
+      inventoryMode: 'fast',
+    })
+    expect(afterFast.map((c) => c.name)).toEqual(['patch-coverage'])
+    const afterCore = buildAfterUnitInventory('/repo', {
+      loadGatesFn: fatGates,
+      inventoryMode: 'core',
+    })
+    expect(afterCore.map((c) => c.name)).toEqual([
+      'patch-coverage',
+      'stryker-diff',
+    ])
+    expect(
+      buildAfterUnitInventory('/repo', {
+        loadGatesFn: fatGates,
+        inventoryMode: 'integrity',
+      }),
+    ).toEqual([])
+  })
+
+  it('respects explicit checks.fast and checks.integrity', () => {
+    const tables = resolveCheckTables('/repo', {
+      loadGatesFn: () => ({
+        checks: {
+          core: [
+            { name: 'lint', argv: ['pnpm', 'lint'] },
+            { name: 'roadmap', argv: ['pnpm', '-s', 'roadmap', 'check'] },
+          ],
+          fast: [{ name: 'custom-fast', argv: ['echo', 'fast'] }],
+          integrity: [{ name: 'custom-integrity', argv: ['echo', 'int'] }],
+          afterUnit: [],
+          optional: [],
+        },
+      }),
+    })
+    expect(tables.fast).toEqual([
+      { name: 'custom-fast', argv: ['echo', 'fast'] },
+    ])
+    expect(tables.integrity).toEqual([
+      { name: 'custom-integrity', argv: ['echo', 'int'] },
+    ])
+    expect(
+      buildInventory('/repo', {
+        loadGatesFn: () => ({
+          checks: {
+            core: [{ name: 'lint', argv: ['pnpm', 'lint'] }],
+            fast: [{ name: 'custom-fast', argv: ['echo', 'fast'] }],
+            integrity: [{ name: 'custom-integrity', argv: ['echo', 'int'] }],
+            afterUnit: [],
+            optional: [],
+          },
+        }),
+        inventoryMode: 'fast',
+      }).map((c) => c.name),
+    ).toEqual(['custom-fast'])
+    expect(
+      buildInventory('/repo', {
+        loadGatesFn: () => ({
+          checks: {
+            core: [{ name: 'lint', argv: ['pnpm', 'lint'] }],
+            fast: [{ name: 'custom-fast', argv: ['echo', 'fast'] }],
+            integrity: [{ name: 'custom-integrity', argv: ['echo', 'int'] }],
+            afterUnit: [],
+            optional: [],
+          },
+        }),
+        inventoryMode: 'integrity',
+      }).map((c) => c.name),
+    ).toEqual(['custom-integrity'])
+  })
+
+  it('main --inventory integrity runs only integrity checks', async () => {
+    const root = tmpRoot()
+    /** @type {string[]} */
+    const names = []
+    const code = await main(['--inventory', 'integrity'], {
+      root,
+      loadGatesFn: fatGates,
+      spawnImpl: (file, args) => {
+        const key = args.includes('openspec-budget')
+          ? 'openspec-budget'
+          : args.includes('codecov-yml')
+            ? 'codecov-yml'
+            : args.includes('roadmap')
+              ? 'roadmap'
+              : 'unknown'
+        names.push(key)
+        return fakeSpawnByCheckName({ [key]: { code: 0 } })(file, args)
+      },
+      write: () => {},
+    })
+    expect(code).toBe(0)
+    expect(names.sort()).toEqual([
+      'codecov-yml',
+      'openspec-budget',
+      'roadmap',
+    ])
+    expect(names).not.toContain('lint')
+    expect(names).not.toContain('unit')
+  })
+
+  it('main rejects unknown --inventory values with exit 2', async () => {
+    let out = ''
+    expect(
+      await main(['--inventory', 'weird'], {
+        write: (t) => {
+          out += t
+        },
+      }),
+    ).toBe(2)
+    expect(out).toMatch(/usage: --inventory/)
+  })
+})
+
 describe('extractProblemLines / formatCheckResult', () => {
   it('caps failures and points at the log path', () => {
     const problems = Array.from({ length: 25 }, (_, i) => `lint: f.ts:${i} x`)
@@ -357,7 +537,7 @@ describe('extractProblemLines / formatCheckResult', () => {
     )
   })
 
-  it('runChecks surfaces all three fixture failures in one pass', async () => {
+  it('runChecks surfaces lint+unit fixture failures on the fast inventory', async () => {
     const root = tmpRoot()
     let out = ''
     const summary = await runChecks({
@@ -372,10 +552,6 @@ describe('extractProblemLines / formatCheckResult', () => {
         knip: { code: 0 },
         'mutation-scope': { code: 0 },
         'gate-values': { code: 0 },
-        roadmap: {
-          code: 1,
-          stdout: fs.readFileSync(path.join(FIX, 'roadmap.txt'), 'utf8'),
-        },
         unit: {
           code: 1,
           stdout: fs.readFileSync(path.join(FIX, 'vitest.txt'), 'utf8'),
@@ -386,12 +562,8 @@ describe('extractProblemLines / formatCheckResult', () => {
       },
     })
     expect(summary.ok).toBe(false)
-    expect(summary.failed.map((r) => r.name).sort()).toEqual([
-      'lint',
-      'roadmap',
-      'unit',
-    ])
-    for (const name of ['lint', 'unit', 'roadmap']) {
+    expect(summary.failed.map((r) => r.name).sort()).toEqual(['lint', 'unit'])
+    for (const name of ['lint', 'unit']) {
       const result = summary.failed.find((r) => r.name === name)
       expect(result.problems.length).toBeLessThanOrEqual(20)
       expect(result.problems.length).toBeGreaterThan(0)
@@ -465,7 +637,7 @@ describe('extractProblemLines / formatCheckResult', () => {
 })
 
 describe('runChecks', () => {
-  it('reports lint, unit, and roadmap failures in one pass', async () => {
+  it('reports lint and unit failures on the default fast inventory', async () => {
     const root = tmpRoot()
     let out = ''
     const summary = await runChecks({
@@ -487,7 +659,6 @@ describe('runChecks', () => {
         knip: { code: 0 },
         'mutation-scope': { code: 0 },
         'gate-values': { code: 0 },
-        roadmap: { code: 1, stderr: 'roadmap: docs/roadmap.md:1 bad\n' },
         unit: { code: 1, stdout: 'FAIL src/b.test.ts:2 unit-fail\n' },
       }),
       write: (t) => {
@@ -496,10 +667,10 @@ describe('runChecks', () => {
     })
     expect(summary.ok).toBe(false)
     const failedNames = summary.failed.map((r) => r.name).sort()
-    expect(failedNames).toEqual(['lint', 'roadmap', 'unit'])
+    expect(failedNames).toEqual(['lint', 'unit'])
     expect(out).toMatch(/lint:.*lint-fail/)
     expect(out).toMatch(/unit:.*unit-fail/)
-    expect(out).toMatch(/roadmap:.*bad/)
+    expect(out).not.toMatch(/roadmap:/)
     expect(fs.existsSync(path.join(root, '.cache/checks/lint.log'))).toBe(true)
     for (const name of failedNames) {
       const block = out
@@ -521,9 +692,6 @@ describe('runChecks', () => {
         knip: { code: 0 },
         'mutation-scope': { code: 0 },
         'gate-values': { code: 0 },
-        'openspec-budget': { code: 0 },
-        'codecov-yml': { code: 0 },
-        roadmap: { code: 0 },
         unit: { code: 0 },
       }),
       write: (t) => {
@@ -532,7 +700,8 @@ describe('runChecks', () => {
     })
     expect(summary.ok).toBe(true)
     const okLines = out.split('\n').filter((l) => l.startsWith('OK '))
-    expect(okLines.length).toBe(10)
+    // fast = DEFAULT_CORE minus integrity (3) → 7 checks
+    expect(okLines.length).toBe(7)
     expect(out).not.toMatch(/PASS|✓|passed/i)
     for (const r of summary.results) {
       expect(r.problems).toEqual([])
@@ -643,7 +812,7 @@ describe('main', () => {
     expect(out).toContain('lint:')
   })
 
-  it('honors --skip-unit and still runs every other check', async () => {
+  it('honors --skip-unit and still runs every other fast check', async () => {
     const root = tmpRoot()
     const summary = await runChecks({
       root,
@@ -652,14 +821,11 @@ describe('main', () => {
       write: () => {},
     })
     expect(summary.results.map((r) => r.name).sort()).toEqual([
-      'codecov-yml',
       'deps',
       'gate-values',
       'knip',
       'lint',
       'mutation-scope',
-      'openspec-budget',
-      'roadmap',
       'typecheck',
     ])
 
@@ -683,11 +849,11 @@ describe('main', () => {
       'knip',
       'mutation-scope',
       'gate-values',
-      'openspec-budget',
-      'codecov-yml',
-      'roadmap',
     ]) {
       expect(joined.some((c) => c.includes(needle))).toBe(true)
+    }
+    for (const needle of INTEGRITY_CHECK_NAMES) {
+      expect(joined.some((c) => c.includes(needle))).toBe(false)
     }
   })
 

@@ -14,6 +14,8 @@ Host repos configure thresholds and check inventories in `quality/gates.json` an
 | `ts-rig-gate` | Gate subcommands (`pr-policy`, `gate-values`, `mutation-scope`, …) |
 | `ts-rig-ci` | CI helpers (`report-comment`, `with-playwright-env`, …) |
 
+`ts-rig-check` / `pnpm check` defaults to the **fast** inventory (A): `checks.core` minus integrity members (`openspec-budget`, `codecov-yml`, `roadmap`), with `afterUnit` minus `stryker-diff`. Pass `--inventory integrity` (or `CHECK_INVENTORY=integrity`) for C1-only gates; `--inventory core` keeps the legacy full core+afterUnit wave. Hosts may set explicit `checks.fast` / `checks.integrity` arrays in `quality/gates.json`.
+
 ## Programmatic
 
 ```js
