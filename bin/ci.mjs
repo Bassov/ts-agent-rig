@@ -20,6 +20,7 @@ const MAP = {
   'with-playwright-env': 'with-playwright-env.mjs',
   'playwright-libs': 'bootstrap-playwright-libs.mjs',
   'hook-clean-env': 'hook-clean-env.mjs',
+  'hook-pre-push': 'hook-pre-push.mjs',
 }
 
 function usage() {
