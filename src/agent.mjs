@@ -76,11 +76,7 @@ const VALUE = new Set([
 export const APPLY_ARCHIVE_PROCEDURE = `\
 Apply/archive (≤10):
 1. Follow host docs/agent-loop.md for orchestration (stages, A/B/C, commit rules, stamp, thin finish).
-2. After proposal+design+tasks(+specs): review-brief --out <file>; openspec-planning-reviewer once (≤1 re-review).
-3. Implement tasks; tick checkboxes; keep touch-set.
-4. pnpm check (OK lines only); e2e/stryker/lhci when in scope.
-5. openspec-implementation-reviewer (brief --out); Manual check; Security if tagged.
-6. Archive: sync delta specs, pnpm agent archive <slug>, pnpm roadmap done <slug>.
+2. Artifact how: openspec/config.yaml rules + operations; reviewers under .cursor/agents.
 Explore: grep ≤30; offset/limit if >400 lines; no re-read; no TodoWrite in -p.
 Task shape: reviewer skill set + brief file path only.`
 
@@ -89,10 +85,7 @@ export const PREP_APPLY_ARCHIVE_PROCEDURE = `\
 Apply/archive prep fast-track (≤10):
 1. Follow host docs/agent-loop.md for orchestration (stages, A/B/C, commit rules, stamp, thin finish).
 2. Brief proposal.md + tasks.md; skip design.md unless arch/security; skip_specs:true if no src/ capability behavior change (touch .skip-specs / .skip-design). Skip openspec-planning-reviewer.
-3. Implement; keep touch-set (intra-capability helper/test OK).
-4. pnpm check (OK lines); e2e/stryker/lhci when in scope.
-5. openspec-implementation-reviewer; Manual check; Security if tagged.
-6. Archive: sync deltas if any, pnpm agent archive <slug>, pnpm roadmap done <slug>.
+3. Else execute the same loop SoT (implement → quality phases → archive → finish).
 Explore: grep ≤30; offset/limit if >400; no re-read; no TodoWrite in -p.
 Task shape: skill set + brief path only.`
 
