@@ -75,24 +75,17 @@ const VALUE = new Set([
 /** ≤10-line apply/archive procedure embedded in the preflight run card. */
 export const APPLY_ARCHIVE_PROCEDURE = `\
 Apply/archive (≤10):
-1. After proposal+design+tasks(+specs): review-brief --out <file>; openspec-planning-reviewer once (≤1 re-review).
-2. Implement tasks; tick checkboxes; keep touch-set. No commit until first B.
-3. pnpm check (OK lines only); e2e/stryker/lhci when in scope.
-4. openspec-implementation-reviewer (brief --out); Manual check; Security if tagged.
-5. Archive: sync delta specs, pnpm agent archive <slug>, pnpm roadmap done <slug>.
-6. Stage 10: PR body. Stage 11: check:integrity + quality:self-check + agent stamp-green. Stage 12: agent finish (thin push+PR; no CI watch).
+1. Follow host docs/agent-loop.md for orchestration (stages, A/B/C, commit rules, stamp, thin finish).
+2. Artifact how: openspec/config.yaml rules + operations; reviewers under .cursor/agents.
 Explore: grep ≤30; offset/limit if >400 lines; no re-read; no TodoWrite in -p.
 Task shape: reviewer skill set + brief file path only.`
 
 /** Prep/contingency fast-track when Tag: prep|contingency + concrete Scope/Done when. */
 export const PREP_APPLY_ARCHIVE_PROCEDURE = `\
 Apply/archive prep fast-track (≤10):
-1. Brief proposal.md + tasks.md; skip design.md unless arch/security; skip_specs:true if no src/ capability behavior change (touch .skip-specs / .skip-design). Skip openspec-planning-reviewer.
-2. Implement; keep touch-set (intra-capability helper/test OK). No commit until first B.
-3. pnpm check (OK lines); e2e/stryker/lhci when in scope.
-4. openspec-implementation-reviewer; Manual check; Security if tagged.
-5. Archive: sync deltas if any, pnpm agent archive <slug>, pnpm roadmap done <slug>.
-6. Stage 10: PR body. Stage 11: check:integrity + quality:self-check + agent stamp-green. Stage 12: agent finish (thin push+PR; no CI watch).
+1. Follow host docs/agent-loop.md for orchestration (stages, A/B/C, commit rules, stamp, thin finish).
+2. Brief proposal.md + tasks.md; skip design.md unless arch/security; skip_specs:true if no src/ capability behavior change (touch .skip-specs / .skip-design). Skip openspec-planning-reviewer.
+3. Else execute the same loop SoT (implement → quality phases → archive → finish).
 Explore: grep ≤30; offset/limit if >400; no re-read; no TodoWrite in -p.
 Task shape: skill set + brief path only.`
 

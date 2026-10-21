@@ -346,12 +346,8 @@ describe('parsers', () => {
       'Skip openspec-planning-reviewer',
     )
     expect(PREP_APPLY_ARCHIVE_PROCEDURE).toContain('skip_specs:true')
-    expect(APPLY_ARCHIVE_PROCEDURE).toContain('No commit until first B')
-    expect(APPLY_ARCHIVE_PROCEDURE).toContain('Stage 10: PR body')
-    expect(APPLY_ARCHIVE_PROCEDURE).toContain('agent stamp-green')
-    expect(APPLY_ARCHIVE_PROCEDURE).toContain('Stage 12: agent finish')
-    expect(PREP_APPLY_ARCHIVE_PROCEDURE).toContain('No commit until first B')
-    expect(PREP_APPLY_ARCHIVE_PROCEDURE).toContain('agent stamp-green')
+    expect(APPLY_ARCHIVE_PROCEDURE).toContain('docs/agent-loop.md')
+    expect(PREP_APPLY_ARCHIVE_PROCEDURE).toContain('docs/agent-loop.md')
   })
 
   it('isPrepFastTrack false when roadmap introduces missing src/<capability>/', () => {
