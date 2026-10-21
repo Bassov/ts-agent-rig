@@ -164,7 +164,7 @@ const HELP = `usage: pnpm agent <cmd> [--root <repo>] [--json] [--quiet]
   manual-qa [--change S] [--base-url U]   headless Playwright smoke (composer-2.5 subagent)
   instructions <artifact> [--change S]   template + rules for one artifact
   stats <path>   per-round tokens; exit 1 if peak>300K or first input>400K
-  archive [--change S]   move openspec/changes/<slug> → archive/YYYY-MM-DD-<slug>
+  archive [--change S]   remove openspec/changes/<slug> (git history + specs/ are SoT)
   help
 
 Requires POSIX shell, Node matching .nvmrc, and pnpm/gh/git on PATH

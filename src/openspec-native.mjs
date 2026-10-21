@@ -213,9 +213,9 @@ export function loadNativeArtifactInstructions(root, artifactId) {
 }
 
 /**
- * Archive a change folder under openspec/changes/archive/YYYY-MM-DD-<slug>/.
- * Prefer ignoring archive/** in agent search (.cursorignore / .rgignore).
- * Default: remove the working dir. Pass keepArchive:true to rename into archive/.
+ * Remove (or optionally keep) an OpenSpec change working directory.
+ * Default: delete openspec/changes/<slug>. Pass keepArchive:true to rename into
+ * openspec/changes/archive/YYYY-MM-DD-<slug>/ (prefer ignoring archive/** in search).
  * @param {string} root
  * @param {string} slug
  * @param {{ date?: string, keepArchive?: boolean, rmOnly?: boolean }} [opts]
