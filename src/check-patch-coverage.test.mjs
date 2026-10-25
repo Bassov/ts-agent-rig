@@ -90,15 +90,24 @@ describe('check-patch-coverage', () => {
     expect(result.uncovered[0]?.lines).toEqual([1, 2])
   })
 
-  it('prefers STRYKER_DIFF_BASE over GATE_RATCHET_BASE when resolving base', () => {
+  it('always scores vs merge-base with origin/main (ignores STRYKER_DIFF_BASE)', () => {
     /** @type {string[]} */
     const diffs = []
+    /** @type {string[]} */
+    const gitCalls = []
     const result = computePatchCoverage({
       env: {
         STRYKER_DIFF_BASE: 'phase-sha',
         GATE_RATCHET_BASE: 'ratchet-base',
       },
       git: (args) => {
+        gitCalls.push(args.join(' '))
+        if (args[0] === 'rev-parse' && args.includes('origin/main')) {
+          return { status: 0, stdout: 'originmainsha\n', stderr: '' }
+        }
+        if (args[0] === 'merge-base') {
+          return { status: 0, stdout: 'mergebasesha\n', stderr: '' }
+        }
         if (args[0] === 'diff') {
           diffs.push(args.join(' '))
           return {
@@ -113,16 +122,26 @@ describe('check-patch-coverage', () => {
       loadGatesFn: () => ({ coverage: { patch: 85 } }),
     })
     expect(result.ok).toBe(true)
-    expect(diffs.some((line) => line.includes('phase-sha...HEAD'))).toBe(true)
+    expect(gitCalls.some((line) => line.includes('merge-base origin/main HEAD'))).toBe(
+      true,
+    )
+    expect(diffs.some((line) => line.includes('mergebasesha...HEAD'))).toBe(true)
+    expect(diffs.some((line) => line.includes('phase-sha'))).toBe(false)
     expect(diffs.some((line) => line.includes('ratchet-base'))).toBe(false)
   })
 
-  it('falls back to GATE_RATCHET_BASE when STRYKER_DIFF_BASE is empty', () => {
+  it('falls back to origin/main tip when merge-base fails', () => {
     /** @type {string[]} */
     const diffs = []
     const result = computePatchCoverage({
-      env: { STRYKER_DIFF_BASE: '  ', GATE_RATCHET_BASE: 'ratchet-base' },
+      env: { STRYKER_DIFF_BASE: 'phase-sha' },
       git: (args) => {
+        if (args[0] === 'rev-parse' && args.includes('origin/main')) {
+          return { status: 0, stdout: 'ok\n', stderr: '' }
+        }
+        if (args[0] === 'merge-base') {
+          return { status: 1, stdout: '', stderr: 'no merge base' }
+        }
         if (args[0] === 'diff') {
           diffs.push(args.join(' '))
           return {
@@ -137,8 +156,6 @@ describe('check-patch-coverage', () => {
       loadGatesFn: () => ({ coverage: { patch: 85 } }),
     })
     expect(result.ok).toBe(true)
-    expect(diffs.some((line) => line.includes('ratchet-base...HEAD'))).toBe(
-      true,
-    )
+    expect(diffs.some((line) => line.includes('origin/main...HEAD'))).toBe(true)
   })
 })

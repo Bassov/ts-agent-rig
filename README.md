@@ -10,7 +10,7 @@ Host procedural SoT for the agent loop (stages, A/B/C, commit rules, stamp, thin
 
 | Binary | Role |
 | --- | --- |
-| `agent` | `preflight`, `finish`, `instructions`, `review-brief`, `stats`, `manual-qa`, … |
+| `agent` | `preflight`, `finish`, `ci-brief`, `ci-wait`, `instructions`, `review-brief`, `stats`, `manual-qa`, … |
 | `roadmap` | Roadmap CLI |
 | `ts-rig-check` | Parallel deterministic check runner (`pnpm check`) |
 | `ts-rig-gate` | Gate subcommands (`pr-policy`, `gate-values`, `mutation-scope`, …) |
@@ -19,6 +19,14 @@ Host procedural SoT for the agent loop (stages, A/B/C, commit rules, stamp, thin
 `ts-rig-check` / `pnpm check` defaults to the **fast** inventory (A): `checks.core` minus integrity members (`openspec-budget`, `codecov-yml`, `roadmap`), with `afterUnit` minus `stryker-diff`. Pass `--inventory integrity` (or `CHECK_INVENTORY=integrity`) for C1-only gates; `--inventory core` keeps the legacy full core+afterUnit wave. Hosts may set explicit `checks.fast` / `checks.integrity` arrays in `quality/gates.json`.
 
 Lefthook pre-push: `ts-rig-ci hook-pre-push` runs `pnpm check:integrity && pnpm check:fast`, except when `AGENT_THIN_FINISH=1` (set by `agent finish` on `git push`) **and** the stage-11 green-tree stamp is current — then it skips both. Hand-push never sets that env, so it always pays A+C1. Never use `--no-verify`.
+
+### `agent ci-wait`
+
+Polls the PR for the current branch (`gh`) until checks settle (default timeout 45m; `--timeout <minutes>`, `--pr N`). Ignores `codecov/patch` and skipped checks. Prints `OK` (exit 0) when the rest pass; otherwise prints failed job names plus a truncated failed-log tail (~80 lines each) and exits non-zero.
+
+### Patch-coverage base
+
+Local `ts-rig-gate patch-coverage` / `check-patch-coverage` always scores against the branch base = merge-base with `origin/main` (same as Codecov). The phase-commit `STRYKER_DIFF_BASE` applies only to `e2e:changed` and `stryker:diff`, not patch coverage.
 
 ## Programmatic
 

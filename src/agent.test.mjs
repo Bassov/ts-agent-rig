@@ -1989,6 +1989,43 @@ describe('finish', () => {
     expect(fs.readFileSync(j.path, 'utf8').trim()).toBe(j.stamp)
   })
 
+  it('ci-wait prints OK when relevant checks pass', () => {
+    const root = gitInitRepo()
+    const exec = fakeExec([
+      [
+        'gh pr view',
+        {
+          stdout: JSON.stringify({
+            headRefOid: 'abc',
+            url: 'https://github.com/o/r/pull/1',
+            headRepository: { nameWithOwner: 'o/r' },
+          }),
+        },
+      ],
+      [
+        'gh pr checks',
+        {
+          stdout: JSON.stringify([
+            { name: 'check', state: 'success', bucket: 'pass', link: '' },
+            {
+              name: 'codecov/patch',
+              state: 'failure',
+              bucket: 'fail',
+              link: '',
+            },
+          ]),
+        },
+      ],
+    ])
+    const r = run(['ci-wait', '--pr', '1', '--root', root], {
+      cwd: root,
+      exec,
+      env: {},
+    })
+    expect(r.code, r.err).toBe(0)
+    expect(r.out.trim()).toBe('OK')
+  })
+
   it('one push per call and persists budget', () => {
     const root = tmpRoot(true)
     let pushes = 0

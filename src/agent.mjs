@@ -22,6 +22,7 @@ import {
   openSpecChangeStatus,
 } from './openspec-native.mjs'
 import { CiBriefError, runCiBrief } from './ci-brief.mjs'
+import { runCiWait } from './ci-wait.mjs'
 
 const nodeRequire = createRequire(import.meta.url)
 
@@ -70,6 +71,7 @@ const VALUE = new Set([
   'out',
   'base-url',
   'pr',
+  'timeout',
 ])
 
 /** ≤10-line apply/archive procedure embedded in the preflight run card. */
@@ -160,6 +162,7 @@ const HELP = `usage: pnpm agent <cmd> [--root <repo>] [--json] [--quiet]
   finish --title T --body-file F   thin push+PR (≤2/branch; no main merge; warn if stamp stale)
   stamp-green   write .cache/agent-green-tree (stage 11 after integrity+self-check)
   ci-brief [--pr N] [--watch]   thin CI failure brief (annotations; stage 13)
+  ci-wait [--pr N] [--timeout MIN]   wait for PR checks (ignore codecov/patch + skipped; default 45m)
   review-brief [--change S] [--base REF] [--rules-json '[…]'] [--out FILE]   reviewer brief
   size [--plan] [--change S]   plan estimate / merge-base..HEAD changed lines
   manual-qa [--change S] [--base-url U]   headless Playwright smoke (composer-2.5 subagent)
@@ -1572,6 +1575,26 @@ export function cmdCiBrief(o, deps) {
   }
 }
 
+export function cmdCiWait(o, deps) {
+  const { root, cwd, env, exec, quiet } = deps
+  try {
+    return runCiWait({
+      exec,
+      root,
+      cwd,
+      env,
+      quiet,
+      pr: o.pr,
+      timeout: o.timeout,
+      sleep: deps.sleep,
+      now: deps.now,
+    })
+  } catch (e) {
+    if (e instanceof CiBriefError) fail(e.message, e.exitCode)
+    throw e
+  }
+}
+
 export function cmdFinish(o, deps) {
   const { root, cwd, env, exec, quiet } = deps
   assertEnv(exec, root, cwd, env, quiet)
@@ -2126,6 +2149,18 @@ function fmtCiBrief(r) {
   return lines.join('\n')
 }
 
+function fmtCiWait(r) {
+  if (r.ok) return 'OK'
+  const lines = []
+  if (r.timedOut) lines.push(r.summary)
+  for (const f of r.failures ?? []) {
+    lines.push(f.name)
+    if (f.logTail) lines.push(f.logTail)
+  }
+  if (!lines.length) lines.push(r.summary || 'CI wait failed')
+  return lines.join('\n')
+}
+
 function fmtBrief(r) {
   return [
     `slug: ${r.slug}`,
@@ -2197,6 +2232,10 @@ export function run(argv, deps = {}) {
         r = cmdCiBrief(o, d)
         code = r.ok ? 0 : 1
         break
+      case 'ci-wait':
+        r = cmdCiWait(o, d)
+        code = r.ok ? 0 : 1
+        break
       case 'review-brief':
         r = cmdReviewBrief(o, d)
         break
@@ -2231,21 +2270,23 @@ export function run(argv, deps = {}) {
             ? fmtStampGreen(r)
             : cmd === 'ci-brief'
               ? fmtCiBrief(r)
-              : cmd === 'instructions'
-                ? fmtInstructions(r)
-                : cmd === 'stats'
-                  ? fmtStats(r)
-                  : cmd === 'size'
-                    ? fmtSize(r)
-                    : cmd === 'manual-qa'
-                      ? fmtManualQa(r)
-                      : cmd === 'archive'
-                        ? [
-                            `ok: ${r.ok}`,
-                            `slug: ${r.slug}`,
-                            `summary: ${r.summary}`,
-                          ].join('\n')
-                        : fmtBrief(r)
+              : cmd === 'ci-wait'
+                ? fmtCiWait(r)
+                : cmd === 'instructions'
+                  ? fmtInstructions(r)
+                  : cmd === 'stats'
+                    ? fmtStats(r)
+                    : cmd === 'size'
+                      ? fmtSize(r)
+                      : cmd === 'manual-qa'
+                        ? fmtManualQa(r)
+                        : cmd === 'archive'
+                          ? [
+                              `ok: ${r.ok}`,
+                              `slug: ${r.slug}`,
+                              `summary: ${r.summary}`,
+                            ].join('\n')
+                          : fmtBrief(r)
     return { code, out }
   } catch (e) {
     if (!(e instanceof AgentError)) throw e
