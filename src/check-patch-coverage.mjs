@@ -9,7 +9,6 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { loadGates } from './load-gates.mjs'
-import { resolvePrPolicyBaseRef } from './check-gate-ratchet.mjs'
 import { hasOwnerApprovedScopeChange } from './check-test-weakening.mjs'
 import { stripGitKeys } from './strip-git-env.mjs'
 
@@ -103,6 +102,35 @@ function skipFile(file) {
   )
 }
 
+/**
+ * Branch base for local patch coverage: merge-base with origin/main (Codecov).
+ * Ignores STRYKER_DIFF_BASE (phase commits stay on e2e:changed / stryker:diff only).
+ * @param {{
+ *   root: string,
+ *   git: (args: string[], cwd: string) => { status?: number|null, stdout?: string, stderr?: string },
+ * }} opts
+ * @returns {string | null}
+ */
+export function resolvePatchCoverageBaseRef(opts) {
+  const { root, git } = opts
+  const origin = git(['rev-parse', '--verify', 'origin/main'], root)
+  const mainRef =
+    (origin.status ?? 1) === 0
+      ? 'origin/main'
+      : (() => {
+          const main = git(['rev-parse', '--verify', 'main'], root)
+          return (main.status ?? 1) === 0 ? 'main' : null
+        })()
+  if (!mainRef) return null
+  const mb = git(['merge-base', mainRef, 'HEAD'], root)
+  if ((mb.status ?? 1) !== 0) {
+    // Fall back to tip; `base...HEAD` still resolves merge-base when tip is valid.
+    return mainRef
+  }
+  const sha = String(mb.stdout ?? '').trim()
+  return sha || mainRef
+}
+
 /** @param {Record<string, unknown>} [opts] */
 export function computePatchCoverage(opts = {}) {
   const root = /** @type {string} */ (opts.root ?? ROOT)
@@ -117,16 +145,15 @@ export function computePatchCoverage(opts = {}) {
 
   let base = opts.baseRef
   if (base === undefined) {
-    const env = opts.env ?? process.env
-    // Prefer STRYKER_DIFF_BASE (phase SHA) so patch-coverage matches stryker:diff / e2e:changed; else GATE_RATCHET_BASE / origin/main.
-    const phaseBase = String(env.STRYKER_DIFF_BASE ?? '').trim()
-    base = phaseBase || resolvePrPolicyBaseRef({ root, git, env })
+    // Always score vs branch base (merge-base with origin/main via A...HEAD), matching
+    // Codecov. Phase-commit STRYKER_DIFF_BASE is only for e2e:changed / stryker:diff.
+    base = resolvePatchCoverageBaseRef({ root, git })
   }
   if (!base) {
     return {
       ok: true,
       skipped: true,
-      reason: 'no origin/main or GATE_RATCHET_BASE',
+      reason: 'no origin/main (or main) merge-base',
       percent: null,
       threshold,
       uncovered: [],
