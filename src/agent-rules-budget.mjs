@@ -47,6 +47,8 @@ export function isScopedAgentRulePath(rel) {
   if (n === '.cursor/commands/next-roadmap-item.md') return true
   if (n.startsWith('.cursor/rules/') && n.endsWith('.mdc')) return true
   if (n.startsWith('.cursor/agents/') && n.endsWith('.md')) return true
+  if (n === 'CLAUDE.md') return true
+  if (/^\.claude\/(agents|commands|rules)\/[^/]+\.md$/.test(n)) return true
   return false
 }
 
