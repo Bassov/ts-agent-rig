@@ -74,6 +74,13 @@ describe('isScopedAgentRulePath / listScopedAgentRulePaths', () => {
     ['README.md', false],
     ['.cursor/rules/notes.md', false],
     ['.cursor/agents/x.txt', false],
+    ['CLAUDE.md', true],
+    ['.claude/agents/openspec-planning-reviewer.md', true],
+    ['.claude/commands/next-roadmap-item.md', true],
+    ['.claude/rules/design.md', true],
+    ['.claude/skills/roadmap/SKILL.md', false],
+    ['.claude/settings.json', false],
+    ['.claude/agents/nested/x.md', false],
   ])('%s → %s', (p, want) => {
     expect(isScopedAgentRulePath(p)).toBe(want)
   })

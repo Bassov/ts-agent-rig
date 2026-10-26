@@ -3518,6 +3518,87 @@ describe('stats', () => {
     expect(() => loadStatsRounds(junkString)).toThrow(/latestRootBlobId/)
   })
 
+  it('parseStatsRoundsJson reads Claude stream-json and transcripts', () => {
+    const usage = (input, cr, cc, out) => ({
+      input_tokens: input,
+      cache_read_input_tokens: cr,
+      cache_creation_input_tokens: cc,
+      output_tokens: out,
+    })
+    const asst = (id, u) =>
+      JSON.stringify({ type: 'assistant', message: { id, usage: u } })
+    const stream = [
+      JSON.stringify({ type: 'system', subtype: 'init' }),
+      asst('m1', usage(10, 0, 1000, 5)),
+      asst('m1', usage(10, 0, 1000, 5)),
+      JSON.stringify({
+        type: 'user',
+        message: { content: [{ type: 'tool_result', content: 'x' }] },
+      }),
+      asst('m2', usage(20, 1000, 300, 7)),
+      JSON.stringify({ type: 'result', usage: usage(30, 1000, 1300, 12) }),
+      JSON.stringify({ type: 'system', subtype: 'init' }),
+      asst('m3', usage(5, 0, 200, 1)),
+    ].join('\n')
+    expect(parseStatsRoundsJson(stream)).toEqual([
+      {
+        input: 1010,
+        output: 12,
+        cacheRead: 1000,
+        modelCalls: 2,
+        context: 1320,
+        estimated: false,
+      },
+      {
+        input: 205,
+        output: 1,
+        cacheRead: 0,
+        modelCalls: 1,
+        context: 205,
+        estimated: false,
+      },
+    ])
+    const transcript = [
+      JSON.stringify({ type: 'user', isMeta: true, message: { content: 'm' } }),
+      asst(undefined, usage(1, 0, 0, 1)),
+      JSON.stringify({ type: 'user', message: { content: 'hi' } }),
+      asst(undefined, usage(2, 0, 0, 1)),
+      asst(undefined, usage(3, 0, 0, 1)),
+      JSON.stringify({
+        type: 'user',
+        message: { content: [{ type: 'text', text: 'again' }] },
+      }),
+      JSON.stringify({ type: 'user', message: { content: [] } }),
+      asst('z', usage(4, 0, 0, 1)),
+    ].join('\n')
+    const rounds = parseStatsRoundsJson(transcript)
+    expect(rounds.map((r) => [r.input, r.modelCalls, r.context])).toEqual([
+      [1, 1, 1],
+      [2, 2, 3],
+      [4, 1, 4],
+    ])
+    expect(() =>
+      parseStatsRoundsJson(
+        [
+          JSON.stringify({ type: 'system', subtype: 'init' }),
+          asst('a', { input_tokens: -1 }),
+        ].join('\n'),
+      ),
+    ).toThrow(/input_tokens is invalid/)
+    expect(
+      parseStatsRoundsJson(
+        [
+          JSON.stringify({ type: 'system', subtype: 'init' }),
+          JSON.stringify({ type: 'system', subtype: 'init' }),
+          JSON.stringify({
+            type: 'assistant',
+            message: { id: 'q', usage: {} },
+          }),
+        ].join('\n'),
+      ),
+    ).toHaveLength(1)
+  })
+
   it('parseStatsRoundsJson covers array normalize and non-JSONL rejection', () => {
     expect(
       parseStatsRoundsJson(

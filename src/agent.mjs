@@ -78,7 +78,7 @@ const VALUE = new Set([
 export const APPLY_ARCHIVE_PROCEDURE = `\
 Apply/archive (≤10):
 1. Follow host docs/agent-loop.md for orchestration (stages, A/B/C, commit rules, stamp, thin finish).
-2. Artifact how: openspec/config.yaml rules + operations; reviewers under .cursor/agents.
+2. Artifact how: openspec/config.yaml rules + operations; reviewers = host reviewer subagents (see docs/agent-loop.md).
 Explore: grep ≤30; offset/limit if >400 lines; no re-read; no TodoWrite in -p.
 Task shape: reviewer skill set + brief file path only.`
 
@@ -165,7 +165,7 @@ const HELP = `usage: pnpm agent <cmd> [--root <repo>] [--json] [--quiet]
   ci-wait [--pr N] [--timeout MIN]   wait for PR checks (ignore codecov/patch + skipped; default 45m)
   review-brief [--change S] [--base REF] [--rules-json '[…]'] [--out FILE]   reviewer brief
   size [--plan] [--change S]   plan estimate / merge-base..HEAD changed lines
-  manual-qa [--change S] [--base-url U]   headless Playwright smoke (composer-2.5 subagent)
+  manual-qa [--change S] [--base-url U]   headless Playwright smoke (run from a cheap-model subagent)
   instructions <artifact> [--change S]   template + rules for one artifact
   stats <path>   per-round tokens; exit 1 if peak>300K or first input>400K
   archive [--change S]   remove openspec/changes/<slug> (default; git history + specs/ are SoT)
@@ -653,6 +653,92 @@ function tryRoundFromObject(obj) {
   return null
 }
 
+function isClaudeAssistantEvent(row) {
+  return (
+    row?.type === 'assistant' &&
+    row.message &&
+    typeof row.message === 'object' &&
+    row.message.usage &&
+    typeof row.message.usage === 'object'
+  )
+}
+
+/** Human prompt in a Claude session transcript (not a tool_result echo). */
+function isClaudePromptEvent(row) {
+  if (row?.type !== 'user' || row.isMeta) return false
+  const c = row.message?.content
+  if (typeof c === 'string') return true
+  return (
+    Array.isArray(c) && c.length > 0 && !c.some((p) => p?.type === 'tool_result')
+  )
+}
+
+/**
+ * Rounds from Claude Code `--output-format stream-json --verbose` output or a
+ * session transcript (`~/.claude/projects/<p>/<id>.jsonl`). A round starts at
+ * each `system/init` event (one per `claude -p` run) or human prompt. Usage is
+ * per model call; one call can emit several assistant events sharing
+ * `message.id`, so calls are de-duplicated by id. Context per call =
+ * input + cache read + cache creation tokens.
+ */
+export function roundsFromClaudeEvents(rows) {
+  /** @type {{ calls: Map<string, object> }[]} */
+  const segments = []
+  let cur = null
+  for (const row of rows) {
+    if ((row?.type === 'system' && row.subtype === 'init') || isClaudePromptEvent(row)) {
+      cur = { calls: new Map() }
+      segments.push(cur)
+      continue
+    }
+    if (!isClaudeAssistantEvent(row)) continue
+    if (!cur) {
+      cur = { calls: new Map() }
+      segments.push(cur)
+    }
+    const id = row.message.id ?? `call-${cur.calls.size}`
+    cur.calls.set(id, row.message.usage)
+  }
+  const rounds = []
+  for (const seg of segments) {
+    if (seg.calls.size === 0) continue
+    let input = 0
+    let output = 0
+    let cacheRead = 0
+    let context = 0
+    let first = true
+    for (const u of seg.calls.values()) {
+      const inp = Number(u.input_tokens ?? 0)
+      const out = Number(u.output_tokens ?? 0)
+      const cr = Number(u.cache_read_input_tokens ?? 0)
+      const cc = Number(u.cache_creation_input_tokens ?? 0)
+      for (const [name, v] of [
+        ['input_tokens', inp],
+        ['output_tokens', out],
+        ['cache_read_input_tokens', cr],
+        ['cache_creation_input_tokens', cc],
+      ]) {
+        if (!Number.isFinite(v) || v < 0) fail(`usage.${name} is invalid`)
+      }
+      const ctx = inp + cr + cc
+      if (first) input = ctx
+      first = false
+      output += out
+      cacheRead += cr
+      if (ctx > context) context = ctx
+    }
+    rounds.push({
+      input,
+      output,
+      cacheRead,
+      modelCalls: seg.calls.size,
+      context,
+      estimated: false,
+    })
+  }
+  return rounds
+}
+
 export function normalizeRounds(rows) {
   if (!Array.isArray(rows) || rows.length === 0)
     fail('stats rounds must be a non-empty array')
@@ -832,18 +918,16 @@ export function parseStatsRoundsJson(text) {
     .filter(Boolean)
   // Multi-line JSONL before whole-file JSON.parse.
   if (lines.length > 1 && lines.every((l) => l.startsWith('{'))) {
-    const rounds = []
+    const rows = []
     for (const t of lines) {
-      let row
       try {
-        row = JSON.parse(t)
+        rows.push(JSON.parse(t))
       } catch {
         fail('stats JSONL line is invalid JSON')
       }
-      const fromUsage = tryRoundFromObject(row)
-      rounds.push(fromUsage ?? row)
     }
-    return normalizeRounds(rounds)
+    if (rows.some(isClaudeAssistantEvent)) return roundsFromClaudeEvents(rows)
+    return normalizeRounds(rows.map((row) => tryRoundFromObject(row) ?? row))
   }
   if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
     let j
@@ -863,7 +947,7 @@ export function parseStatsRoundsJson(text) {
     if (j && Array.isArray(j.rounds)) return normalizeRounds(j.rounds)
     if (j?.agentStats?.rounds) return normalizeRounds(j.agentStats.rounds)
     fail(
-      'stats JSON must be cursor-agent result (usage.*Tokens), {rounds:[…]}, or an array of rounds',
+      'stats JSON must be cursor-agent result (usage.*Tokens), {rounds:[…]}, or an array of rounds (Claude: pass the stream-json log)',
     )
   }
   // Multi-line `{...}` JSONL is handled above. Anything else that does not
