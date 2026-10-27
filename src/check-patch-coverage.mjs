@@ -97,6 +97,7 @@ function skipFile(file) {
     /\.(test|spec)\.[a-z]+$/i.test(file) ||
     file.endsWith('.test-helpers.ts') ||
     file.endsWith('.d.ts') ||
+    /\.css$/i.test(file) ||
     file === 'src/main.tsx' ||
     /scripts\/.*-cli\.mjs$/.test(file)
   )

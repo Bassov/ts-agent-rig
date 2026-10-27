@@ -158,4 +158,16 @@ describe('check-patch-coverage', () => {
     expect(result.ok).toBe(true)
     expect(diffs.some((line) => line.includes('origin/main...HEAD'))).toBe(true)
   })
+  it('ignores .css files missing from lcov (CSS is not instrumented)', () => {
+    const result = computePatchCoverage({
+      baseRef: 'BASE',
+      diffText: '+++ b/src/ui/Panel.css\n@@ -0,0 +1,3 @@\n+.a {}\n+.b {}\n+.c {}\n',
+      lcovText: '',
+      loadGatesFn: () => ({ coverage: { patch: 85 } }),
+    })
+    expect(result.ok).toBe(true)
+    expect(result.percent).toBe(100)
+    expect(result.total).toBe(0)
+  })
+
 })
