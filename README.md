@@ -10,7 +10,7 @@ Host procedural SoT for the agent loop (stages, A/B/C, commit rules, stamp, thin
 
 | Binary | Role |
 | --- | --- |
-| `agent` | `preflight`, `finish`, `ci-brief`, `ci-wait`, `instructions`, `review-brief`, `stats`, `manual-qa`, … |
+| `agent` | `preflight`, `finish`, `finalize`, `ci-brief`, `ci-wait`, `instructions`, `review-brief`, `stats`, `manual-qa`, … |
 | `roadmap` | Roadmap CLI |
 | `ts-rig-check` | Parallel deterministic check runner (`pnpm check`) |
 | `ts-rig-gate` | Gate subcommands (`pr-policy`, `gate-values`, `mutation-scope`, …) |

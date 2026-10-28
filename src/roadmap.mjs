@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url'
 export const INDEX_REL = 'docs/roadmap.md'
 export const DIR_REL = 'docs/roadmap'
 export const ARCHIVE_REL = 'docs/roadmap/archive'
-export const TAGS = ['prep', 'feature', 'contingency']
+export const TAGS = ['prep', 'feature', 'contingency', 'lite']
 export const SLUG_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
 // - [ ] [tag] [slug](roadmap/M/slug.md) — title      (tag optional)
 export const ITEM_RE =
@@ -211,7 +211,7 @@ export function stripMeta(text) {
 export const dedent = (l) => (l.startsWith('  ') ? l.slice(2) : l)
 function defaultBody(tag) {
   const b = ['- [ ] TODO: scope']
-  if (tag === 'prep') b.push('- **Done when:** TODO')
+  if (tag === 'prep' || tag === 'lite') b.push('- **Done when:** TODO')
   if (tag === 'feature') b.push('- **Browser check:** TODO')
   return b
 }
@@ -339,6 +339,8 @@ export function assertOpenItem(ctx, slug, o = {}) {
 export function cmdNext(ctx, o = {}) {
   if (o.slug) {
     const it = assertOpenItem(ctx, o.slug, o)
+    if (o.tag && it.tag !== o.tag)
+      fail(`slug ${o.slug} has tag ${it.tag ?? 'none'}, expected ${o.tag}`)
     return itemView(ctx, it, !o.noBody)
   }
   const skip = new Set(o.skip)
@@ -346,6 +348,7 @@ export function cmdNext(ctx, o = {}) {
     (i) =>
       !i.done &&
       (o.includeContingency || i.tag !== 'contingency') &&
+      (!o.tag || i.tag === o.tag) &&
       !skip.has(i.slug),
   )
   return it ? itemView(ctx, it, !o.noBody) : null
@@ -388,7 +391,7 @@ export function cmdAdd(ctx, slug, o) {
       'usage: add <slug> --tag <t> --title "..." (--after <slug> | --before <slug> | --milestone <M> [--top|--bottom])',
     )
   if (!SLUG_RE.test(slug)) fail(`bad slug "${slug}": use kebab-case [a-z0-9-]`)
-  if (!o.tag) fail('--tag required (prep|feature|contingency)')
+  if (!o.tag) fail(`--tag required (${TAGS.join('|')})`)
   if (!TAGS.includes(o.tag)) fail(`bad tag "${o.tag}": use ${TAGS.join('|')}`)
   const title = (o.title ?? '').trim()
   if (!title) fail('--title required')
@@ -1022,11 +1025,11 @@ export function parseArgs(argv) {
   return o
 }
 const HELP = `usage: pnpm roadmap <cmd> [--root <repo>] [--json]
-  next [--slug S] [--skip a,b] [--include-contingency] [--no-body]   current item (first open, or explicit slug)
+  next [--slug S] [--tag T] [--skip a,b] [--include-contingency] [--no-body]   current item (first open, or explicit slug / tag filter)
   show <slug> [--no-body]                                 one item
   list [--milestone M] [--open]                           one line per item
   claim <slug> [--include-contingency]                    validate open slug for preflight hold
-  add <slug> --tag prep|feature|contingency --title "..." (--after S | --before S | --milestone M [--top|--bottom]) [--body "..." | --body-file F]
+  add <slug> --tag prep|feature|contingency|lite --title "..." (--after S | --before S | --milestone M [--top|--bottom]) [--body "..." | --body-file F]
   done <slug> [--note "..."]                              mark Status: done in the item file (no index tick; required note for [contingency])
   sync                                                    tick index [x] from item-file Status: done (post-merge)
   archive <M>                                             retire a fully-done milestone: drop index block + delete folder (post-merge)
@@ -1125,6 +1128,7 @@ export function run(argv, { cwd = process.cwd() } = {}) {
       case 'next':
         r = cmdNext(load(root), {
           slug: o.slug,
+          tag: o.tag,
           skip: (o.skip ?? '')
             .split(',')
             .map((s) => s.trim())

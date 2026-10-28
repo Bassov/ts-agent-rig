@@ -67,6 +67,8 @@ import {
   hasPrepConcreteScope,
   introducesNewSrcCapability,
   isPrepFastTrack,
+  isLiteTrack,
+  LITE_APPLY_PROCEDURE,
   PREP_APPLY_ARCHIVE_PROCEDURE,
   APPLY_ARCHIVE_PROCEDURE,
 } from './agent.mjs'
@@ -169,6 +171,7 @@ const HELP_SNIPPETS = [
   'preflight [--slug S] [--skip a,b]',
   'finish --title T --body-file F',
   'stamp-green',
+  'finalize [slug]',
   'review-brief [--change S] [--base REF] [--rules-json',
   'size [--plan]',
   'manual-qa',
@@ -730,7 +733,7 @@ describe('preflight', () => {
     ).toBe(true)
     expect(j.prepFastTrack).toBe(false)
     expect(j.runCard.prepFastTrack).toBe(false)
-    expect(j.runCard.procedure).toContain('openspec-planning-reviewer')
+    expect(j.runCard.procedure).toContain('reviewer subagents')
     expect(j.runCard.procedure.split('\n').length).toBeLessThanOrEqual(10)
     expect(j.touchSet).toBe('TBD until design.md')
     expect(j.branch).toBe('feat/demo-item')
@@ -807,7 +810,7 @@ describe('preflight', () => {
     expect(r.out).toContain('- Keep proposals under 80 words.')
     expect(r.out).toContain('prepFastTrack: false')
     expect(r.out).toContain('--- apply/archive procedure ---')
-    expect(r.out).toContain('openspec-planning-reviewer')
+    expect(r.out).toContain('reviewer subagents')
   })
 
   it('text mode prints (none) for empty rules and string goal', () => {
@@ -4500,12 +4503,76 @@ describe('linked worktree preflight --slug', () => {
 
 describe('E2E_PORT config', () => {
   it('playwright config wires E2E_PORT and disables server reuse', () => {
+    const hostRoot = process.env.TS_RIG_HOST_ROOT
+      ? path.resolve(process.env.TS_RIG_HOST_ROOT)
+      : path.resolve(here, '../../photobooks')
     const src = fs.readFileSync(
-      path.join(here, '..', '..', '..', 'playwright.config.ts'),
+      path.join(hostRoot, 'playwright.config.ts'),
       'utf8',
     )
     expect(src).toMatch(/E2E_PORT \?\? ['"]4173['"]/)
     expect(src).toMatch(/reuseExistingServer:\s*false/)
     expect(src).toMatch(/--port \$\{e2ePort\}/)
+  })
+})
+
+
+describe('finalize', () => {
+  it('delta sync check fails when main specs missing', () => {
+    const root = tmpRoot()
+    const change = path.join(root, 'openspec', 'changes', 'fin-item')
+    fs.mkdirSync(path.join(change, 'specs', 'cap'), { recursive: true })
+    fs.writeFileSync(
+      path.join(change, 'specs', 'cap', 'spec.md'),
+      '## ADDED Requirements\n\n### Requirement: Cap Thing\n\nThe system SHALL.\n',
+    )
+    const r = run(['finalize', 'fin-item', '--json', '--root', root], {
+      cwd: root,
+      exec: fakeExec([
+        ...envOk,
+        ['git status --porcelain', { stdout: '' }],
+        ['git branch --show-current', { stdout: 'feat/fin-item\n' }],
+      ]),
+      env: {},
+    })
+    expect(r.code).toBe(1)
+    expect(r.err || r.out).toMatch(/delta-spec sync check failed|missing openspec\/specs/)
+  })
+
+  it('No delta specs path archives and continues until roadmap stub fails', () => {
+    const root = tmpRoot(true)
+    fs.mkdirSync(path.join(root, 'openspec', 'changes', 'fin-lite'), {
+      recursive: true,
+    })
+    fs.writeFileSync(
+      path.join(root, 'openspec', 'changes', 'fin-lite', '.skip-specs'),
+      '',
+    )
+    const r = run(['finalize', '--change', 'fin-lite', '--json', '--root', root], {
+      cwd: root,
+      exec: fakeExec([
+        ...envOk,
+        ['git status --porcelain', { stdout: '' }],
+        ['pnpm -s roadmap done fin-lite', { code: 1, stderr: 'unknown slug: fin-lite\n' }],
+      ]),
+      env: {},
+    })
+    expect(r.code).toBe(1)
+    const j = JSON.parse(r.out)
+    expect(j.ok).toBe(false)
+    expect(j.stage).toBe('roadmap-done')
+    expect(j.sync.note).toMatch(/No delta specs/)
+    expect(
+      fs.existsSync(path.join(root, 'openspec', 'changes', 'fin-lite')),
+    ).toBe(false)
+  })
+})
+
+describe('isLiteTrack', () => {
+  it('detects lite tag', () => {
+    expect(isLiteTrack({ tag: 'lite' })).toBe(true)
+    expect(isLiteTrack({ tag: 'Lite' })).toBe(true)
+    expect(isLiteTrack({ tag: 'feature' })).toBe(false)
+    expect(LITE_APPLY_PROCEDURE).toMatch(/no openspec\/changes/)
   })
 })

@@ -90,6 +90,14 @@ Apply/archive prep fast-track (≤10):
 3. Else execute the same loop SoT (implement → quality phases → archive → finish).
 Explore: grep ≤30; offset/limit if >400; no re-read; no TodoWrite in -p.
 Task shape: skill set + brief path only.`
+export const LITE_APPLY_PROCEDURE = `\
+Lite track (≤10):
+1. Follow host docs/agent-loop.md lite routing (no openspec/changes, no planning reviewer, no archive).
+2. Roadmap item + PR body are the plan; still run A, B (changed specs), ui-review/smoke when UI, implementation reviewer, roadmap done.
+3. Escalate to normal OpenSpec track if apply grows or touches domain behavior.
+`
+
+
 
 /** True when body has ## Scope, a checkbox, and - **Done when:**. */
 export function hasPrepConcreteScope(body) {
@@ -120,6 +128,11 @@ export function isPrepFastTrack(item, root) {
   if (!hasPrepConcreteScope(item?.body)) return false
   if (root && introducesNewSrcCapability(root, item?.body)) return false
   return true
+}
+
+/** Roadmap Tag: lite — no openspec/changes; item + PR body are the plan. */
+export function isLiteTrack(item) {
+  return String(item?.tag ?? '').toLowerCase() === 'lite'
 }
 
 export const STATS_PEAK_CONTEXT_MAX = 300_000
@@ -161,6 +174,7 @@ const HELP = `usage: pnpm agent <cmd> [--root <repo>] [--json] [--quiet]
   preflight [--slug S] [--skip a,b]   env + roadmap next (+ branch from origin/main); run card
   finish --title T --body-file F   thin push+PR (≤2/branch; no main merge; warn if stamp stale)
   stamp-green   write .cache/agent-green-tree (stage 11 after integrity+self-check)
+  finalize [slug] [--change S]   stages 10–11: delta-sync check → archive → roadmap done+sync → integrity → self-check → stamp-green
   ci-brief [--pr N] [--watch]   thin CI failure brief (annotations; stage 13)
   ci-wait [--pr N] [--timeout MIN]   wait for PR checks (ignore codecov/patch + skipped; default 45m)
   review-brief [--change S] [--base REF] [--rules-json '[…]'] [--out FILE]   reviewer brief
@@ -1403,26 +1417,42 @@ export function cmdPreflight(o, deps) {
   const stale = refreshStaleFeatureBranch(exec, root, cwd, env, quiet)
   const checklistIds = readReviewChecklistIds(root)
 
-  ensureOpenSpecChange(root, item.slug)
+  const liteTrack = isLiteTrack(item)
+  if (!liteTrack) ensureOpenSpecChange(root, item.slug)
 
   const prepFastTrack = isPrepFastTrack(item, root)
-  const runCard = buildRunCard(root, item.slug, {
-    prepFastTrack,
-  })
-  const primaryId =
-    runCard.ready.find((id) => id === 'proposal') ?? runCard.ready[0] ?? null
-  const instructions = primaryId
-    ? runCard.artifacts[primaryId]
-    : loadArtifactInstructions(root, 'proposal', item.slug)
+  const runCard = liteTrack
+    ? {
+        change: item.slug,
+        ready: [],
+        blocked: [],
+        artifacts: {},
+        procedure: LITE_APPLY_PROCEDURE,
+        prepFastTrack: false,
+        liteTrack: true,
+      }
+    : buildRunCard(root, item.slug, {
+        prepFastTrack,
+      })
+  const primaryId = liteTrack
+    ? null
+    : (runCard.ready.find((id) => id === 'proposal') ?? runCard.ready[0] ?? null)
+  const instructions = liteTrack
+    ? { artifact: 'lite', rules: [], template: LITE_APPLY_PROCEDURE }
+    : primaryId
+      ? runCard.artifacts[primaryId]
+      : loadArtifactInstructions(root, 'proposal', item.slug)
   if (!Array.isArray(instructions.rules))
     fail('openspec instructions missing rules array')
 
   const designPath = path.join('openspec', 'changes', item.slug, 'design.md')
-  const touchSet = fs.existsSync(path.join(root, designPath))
-    ? designPath
-    : prepFastTrack
-      ? 'prep fast-track (design.md optional)'
-      : 'TBD until design.md'
+  const touchSet = liteTrack
+    ? 'lite track (no openspec/changes)'
+    : fs.existsSync(path.join(root, designPath))
+      ? designPath
+      : prepFastTrack
+        ? 'prep fast-track (design.md optional)'
+        : 'TBD until design.md'
 
   ensureRunStarted(root, branch, Date.now(), exec)
 
@@ -1435,6 +1465,7 @@ export function cmdPreflight(o, deps) {
     staleWarning: stale.warning,
     checklistIds,
     prepFastTrack,
+    liteTrack,
     item: {
       slug: item.slug,
       tag: item.tag,
@@ -1626,6 +1657,267 @@ export function mergeOriginMainIfNeeded(exec, root, cwd, env, quiet) {
     'git commit merge',
   )
   return { merged: true, resolved: files }
+}
+
+
+/** Parse OpenSpec delta requirement names from a change spec.md. */
+export function parseDeltaRequirementNames(text) {
+  const added = []
+  const modified = []
+  const removed = []
+  let section = null
+  for (const line of String(text ?? '').split('\n')) {
+    if (/^##\s+ADDED\s+Requirements/i.test(line)) {
+      section = 'added'
+      continue
+    }
+    if (/^##\s+MODIFIED\s+Requirements/i.test(line)) {
+      section = 'modified'
+      continue
+    }
+    if (/^##\s+REMOVED\s+Requirements/i.test(line)) {
+      section = 'removed'
+      continue
+    }
+    if (/^##\s+/.test(line)) {
+      section = null
+      continue
+    }
+    const m = /^###\s+Requirement:\s+(.+?)\s*$/.exec(line)
+    if (!m || !section) continue
+    if (section === 'added') added.push(m[1])
+    else if (section === 'modified') modified.push(m[1])
+    else if (section === 'removed') removed.push(m[1])
+  }
+  return { added, modified, removed }
+}
+
+/**
+ * Delta-spec sync check (archive precondition): each capability under
+ * openspec/changes/<slug>/specs/ must already be merged into openspec/specs/.
+ * No change dir / .skip-specs / empty specs → ok ("No delta specs").
+ */
+export function assertDeltaSpecsSynced(root, slug) {
+  const changeDir = path.join(root, 'openspec', 'changes', slug)
+  if (!fs.existsSync(changeDir)) {
+    return { ok: true, note: `no change dir for ${slug}` }
+  }
+  if (fs.existsSync(path.join(changeDir, '.skip-specs'))) {
+    return { ok: true, note: 'No delta specs (.skip-specs)' }
+  }
+  const specsRoot = path.join(changeDir, 'specs')
+  if (!fs.existsSync(specsRoot)) {
+    return { ok: true, note: 'No delta specs' }
+  }
+  const caps = fs
+    .readdirSync(specsRoot, { withFileTypes: true })
+    .filter((d) => d.isDirectory())
+    .map((d) => d.name)
+    .sort()
+  if (caps.length === 0) return { ok: true, note: 'No delta specs' }
+
+  const problems = []
+  for (const cap of caps) {
+    const deltaPath = path.join(specsRoot, cap, 'spec.md')
+    if (!fs.existsSync(deltaPath)) continue
+    const delta = fs.readFileSync(deltaPath, 'utf8')
+    const mainPath = path.join(root, 'openspec', 'specs', cap, 'spec.md')
+    if (!fs.existsSync(mainPath)) {
+      problems.push(
+        `missing openspec/specs/${cap}/spec.md (delta not synced)`,
+      )
+      continue
+    }
+    const main = fs.readFileSync(mainPath, 'utf8')
+    const { added, modified, removed } = parseDeltaRequirementNames(delta)
+    for (const name of [...added, ...modified]) {
+      if (!main.includes(`### Requirement: ${name}`)) {
+        problems.push(
+          `openspec/specs/${cap}/spec.md missing Requirement: ${name}`,
+        )
+      }
+    }
+    for (const name of removed) {
+      if (main.includes(`### Requirement: ${name}`)) {
+        problems.push(
+          `openspec/specs/${cap}/spec.md still has removed Requirement: ${name}`,
+        )
+      }
+    }
+  }
+  if (problems.length) {
+    fail(`delta-spec sync check failed:\n${problems.join('\n')}`, 1)
+  }
+  return { ok: true, note: `synced ${caps.length} capability delta(s)` }
+}
+
+function resolveFinalizeSlug(o, deps) {
+  const { cwd, env, exec, quiet } = deps
+  let slug = o._[1] || o.change
+  if (!slug) {
+    const br = mustOk(
+      sh(exec, cwd, env, quiet, 'git', ['branch', '--show-current']),
+      'git branch',
+    )
+    slug = slugFromBranch(br.stdout.trim())
+  }
+  if (!slug) fail('usage: pnpm agent finalize <slug> [--change S]')
+  if (o._[1] && o.change && o._[1] !== o.change) {
+    fail(`slug mismatch: positional ${o._[1]} vs --change ${o.change}`)
+  }
+  return slug
+}
+
+/**
+ * Collapse stages 10–11: delta-sync check → archive → roadmap done+sync →
+ * commit if needed → check:integrity → quality:self-check → stamp-green.
+ * Prints only failures + one OK line (see fmtFinalize).
+ */
+export function cmdFinalize(o, deps) {
+  const { root, cwd, env, exec, quiet } = deps
+  assertEnv(exec, root, cwd, env, quiet)
+  const slug = resolveFinalizeSlug(o, deps)
+
+  const dirty0 = porcelain(exec, cwd, env, quiet)
+  if (dirty0) fail(`working tree not clean (commit first):\n${dirty0}`, 1)
+
+  const sync = assertDeltaSpecsSynced(root, slug)
+
+  const archived = archiveOpenSpecChange(root, slug)
+
+  const doneR = sh(exec, cwd, env, quiet, 'pnpm', [
+    '-s',
+    'roadmap',
+    'done',
+    slug,
+  ])
+  if (doneR.code !== 0) {
+    const msg = tailOutput(doneR.stdout, doneR.stderr)
+    if (!/already done/i.test(msg)) {
+      return {
+        ok: false,
+        slug,
+        stage: 'roadmap-done',
+        sync,
+        archived,
+        summary: msg,
+      }
+    }
+  }
+  const syncRoadmap = sh(exec, cwd, env, quiet, 'pnpm', [
+    '-s',
+    'roadmap',
+    'sync',
+  ])
+  if (syncRoadmap.code !== 0) {
+    return {
+      ok: false,
+      slug,
+      stage: 'roadmap-sync',
+      sync,
+      archived,
+      summary: tailOutput(syncRoadmap.stdout, syncRoadmap.stderr),
+    }
+  }
+
+  const dirty = porcelain(exec, cwd, env, quiet)
+  let committed = false
+  if (dirty) {
+    mustOk(
+      sh(exec, cwd, env, quiet, 'git', [
+        'add',
+        '-A',
+        '--',
+        'openspec',
+        'docs/roadmap.md',
+        'docs/roadmap',
+      ]),
+      'git add archive/roadmap',
+    )
+    const unexpected = porcelain(exec, cwd, env, quiet)
+      .split('\n')
+      .map((l) => l.trim())
+      .filter(Boolean)
+      .filter((l) => {
+        const pathPart = l.length >= 3 ? l.slice(3) : l
+        const p = pathPart.includes(' -> ')
+          ? pathPart.split(' -> ').at(-1)
+          : pathPart
+        if (p === 'openspec' || p.startsWith('openspec/')) return false
+        if (p === 'docs/roadmap.md' || p.startsWith('docs/roadmap')) return false
+        return true
+      })
+    if (unexpected.length) {
+      return {
+        ok: false,
+        slug,
+        stage: 'commit',
+        sync,
+        archived,
+        summary: `unexpected dirty paths after archive/roadmap:\n${unexpected.join('\n')}`,
+      }
+    }
+    const commitR = sh(exec, cwd, env, quiet, 'git', [
+      'commit',
+      '-m',
+      `chore(${slug}): archive + roadmap done`,
+    ])
+    if (commitR.code !== 0) {
+      return {
+        ok: false,
+        slug,
+        stage: 'commit',
+        sync,
+        archived,
+        summary: tailOutput(commitR.stdout, commitR.stderr),
+      }
+    }
+    committed = true
+  }
+
+  const integrity = sh(exec, cwd, env, quiet, 'pnpm', [
+    '-s',
+    'check:integrity',
+  ])
+  if (integrity.code !== 0) {
+    return {
+      ok: false,
+      slug,
+      stage: 'check:integrity',
+      sync,
+      archived,
+      committed,
+      summary: tailOutput(integrity.stdout, integrity.stderr),
+    }
+  }
+
+  const selfCheck = sh(exec, cwd, env, quiet, 'pnpm', [
+    '-s',
+    'quality:self-check',
+  ])
+  if (selfCheck.code !== 0) {
+    return {
+      ok: false,
+      slug,
+      stage: 'quality:self-check',
+      sync,
+      archived,
+      committed,
+      summary: tailOutput(selfCheck.stdout, selfCheck.stderr),
+    }
+  }
+
+  const stamp = writeGreenTreeStamp(root, { exec, cwd, env })
+  return {
+    ok: true,
+    slug,
+    sync,
+    archived,
+    committed,
+    stamp,
+    path: greenTreeStampPath(root),
+    summary: `finalize ${slug} ok`,
+  }
 }
 
 export function cmdStampGreen(_o, deps) {
@@ -2212,6 +2504,16 @@ function fmtStampGreen(r) {
     `summary: ${r.summary}`,
   ].join('\n')
 }
+function fmtFinalize(r) {
+  if (!r.ok) {
+    const bits = [`FAIL ${r.stage || 'finalize'}`]
+    if (r.summary) bits.push(String(r.summary).trim())
+    return bits.join('\n')
+  }
+  return `ok: finalize ${r.slug}`
+}
+
+
 
 function fmtCiBrief(r) {
   const lines = [
@@ -2294,7 +2596,8 @@ export function run(argv, deps = {}) {
     const [cmd] = o._
     if (!cmd || cmd === 'help' || o.help)
       return { code: cmd || o.help ? 0 : 2, out: HELP }
-    const allowsArg = cmd === 'instructions' || cmd === 'stats'
+    const allowsArg =
+      cmd === 'instructions' || cmd === 'stats' || cmd === 'finalize'
     if (o._.length > 1 && !allowsArg) fail(`unexpected argument: ${o._[1]}`)
     if (o._.length > 2) fail(`unexpected argument: ${o._[2]}`)
     const root = path.resolve(cwd, o.root ?? '.')
@@ -2311,6 +2614,10 @@ export function run(argv, deps = {}) {
         break
       case 'stamp-green':
         r = cmdStampGreen(o, d)
+        break
+      case 'finalize':
+        r = cmdFinalize(o, d)
+        code = r.ok ? 0 : 1
         break
       case 'ci-brief':
         r = cmdCiBrief(o, d)
@@ -2352,7 +2659,9 @@ export function run(argv, deps = {}) {
           ? fmtFinish(r)
           : cmd === 'stamp-green'
             ? fmtStampGreen(r)
-            : cmd === 'ci-brief'
+            : cmd === 'finalize'
+              ? fmtFinalize(r)
+              : cmd === 'ci-brief'
               ? fmtCiBrief(r)
               : cmd === 'ci-wait'
                 ? fmtCiWait(r)

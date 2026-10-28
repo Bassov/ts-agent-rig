@@ -1519,11 +1519,11 @@ describe('exact outputs', () => {
     expect(run([]).code).toBe(2)
     expect(run(['help']).out).toMatchInlineSnapshot(`
       "usage: pnpm roadmap <cmd> [--root <repo>] [--json]
-        next [--slug S] [--skip a,b] [--include-contingency] [--no-body]   current item (first open, or explicit slug)
+        next [--slug S] [--tag T] [--skip a,b] [--include-contingency] [--no-body]   current item (first open, or explicit slug / tag filter)
         show <slug> [--no-body]                                 one item
         list [--milestone M] [--open]                           one line per item
         claim <slug> [--include-contingency]                    validate open slug for preflight hold
-        add <slug> --tag prep|feature|contingency --title "..." (--after S | --before S | --milestone M [--top|--bottom]) [--body "..." | --body-file F]
+        add <slug> --tag prep|feature|contingency|lite --title "..." (--after S | --before S | --milestone M [--top|--bottom]) [--body "..." | --body-file F]
         done <slug> [--note "..."]                              mark Status: done in the item file (no index tick; required note for [contingency])
         sync                                                    tick index [x] from item-file Status: done (post-merge)
         archive <M>                                             retire a fully-done milestone: drop index block + delete folder (post-merge)
@@ -2191,11 +2191,11 @@ Three.
       ),
     ).toBe('error: anchor beta is in A1, not A2')
     expect(err(root, 'add', 'n3', '--title', 'T', '--after', 'beta')).toBe(
-      'error: --tag required (prep|feature|contingency)',
+      'error: --tag required (prep|feature|contingency|lite)',
     )
     expect(
       err(root, 'add', 'n3', '--tag', 'x', '--title', 'T', '--after', 'beta'),
-    ).toBe('error: bad tag "x": use prep|feature|contingency')
+    ).toBe('error: bad tag "x": use prep|feature|contingency|lite')
     expect(err(root, 'add', 'n3', '--tag', 'prep', '--after', 'beta')).toBe(
       'error: --title required',
     )
@@ -2467,5 +2467,38 @@ describe('withFileStatus and assertOpenItem edges', () => {
         ticked: ['a', 'b'],
       }),
     ).toBe('retired A (removed docs/roadmap/A)\nsynced ticks: a, b')
+  })
+})
+
+
+describe('lite tag', () => {
+  it('accepts --tag lite on add and filters next --tag lite', () => {
+    const root = migrated()
+    ok(
+      root,
+      'add',
+      'lite-item',
+      '--tag',
+      'lite',
+      '--title',
+      'Lite item',
+      '--after',
+      'beta',
+    )
+    const next = ok(root, 'next', '--tag', 'lite', '--json')
+    const j = JSON.parse(next)
+    expect(j.slug).toBe('lite-item')
+    expect(j.tag).toBe('lite')
+    const meta = fs.readFileSync(
+      path.join(root, 'docs/roadmap/A1/lite-item.md'),
+      'utf8',
+    )
+    expect(meta).toMatch(/^Tag: lite$/m)
+    expect(meta).toMatch(/Done when/)
+  })
+
+  it('next --tag lite returns empty when none', () => {
+    const root = migrated()
+    expect(ok(root, 'next', '--tag', 'lite')).toMatch(/next: none/)
   })
 })
