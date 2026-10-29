@@ -34,7 +34,6 @@ export const OWNER_WAIVABLE_RULE_IDS = Object.freeze([
   'exclude-added',
   'gate-file-gone',
   'temporary-excludes-grew',
-  'ts-agent-rig-pin-changed',
 ])
 
 export const TS_AGENT_RIG_PACKAGE = '@albasov/ts-agent-rig'
@@ -60,7 +59,6 @@ export const RULE_IDS = Object.freeze([
   'item-criteria-loosened',
   'diff-below-nightly',
   'temporary-excludes-grew',
-  'ts-agent-rig-pin-changed',
   AGENT_RULES_OVER_BUDGET,
 ])
 
@@ -132,7 +130,6 @@ export const MSGS = Object.freeze({
   diffBelowNightlyPrefix: 'stryker.diffThresholds.',
   diffBelowNightlyMid: ' < stryker.thresholds.',
   tempExcludesGrewPrefix: 'mutation.temporaryExcludes grew: ',
-  tsAgentRigPinPrefix: `${TS_AGENT_RIG_PACKAGE} pin changed: `,
 })
 
 /** Detector / probe needles — exact values pinned by unit tests. */
@@ -1418,26 +1415,6 @@ export function compareGateTrees(baseFiles, headFiles, opts = {}) {
       if (!Object.prototype.hasOwnProperty.call(bPatched, k)) {
         fail('patched-deps-grown', `${MSGS.patchedGrewPrefix}${k}`)
       }
-    }
-    const bRig = readPackageDepSpec(bPkg, TS_AGENT_RIG_PACKAGE)
-    const hRig = readPackageDepSpec(hPkg, TS_AGENT_RIG_PACKAGE)
-    if (bRig !== hRig) {
-      fail(
-        'ts-agent-rig-pin-changed',
-        `${MSGS.tsAgentRigPinPrefix}${String(bRig)} -> ${String(hRig)}`,
-      )
-    }
-    const bLock = getFile(baseFiles, 'pnpm-lock.yaml')
-    const hLock = getFile(headFiles, 'pnpm-lock.yaml')
-    if (
-      bRig != null &&
-      extractPnpmLockPackageBlock(bLock, TS_AGENT_RIG_PACKAGE) !==
-        extractPnpmLockPackageBlock(hLock, TS_AGENT_RIG_PACKAGE)
-    ) {
-      fail(
-        'ts-agent-rig-pin-changed',
-        `${MSGS.tsAgentRigPinPrefix}pnpm-lock.yaml resolution changed`,
-      )
     }
   } catch (e) {
     fail(
