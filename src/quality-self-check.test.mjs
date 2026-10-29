@@ -93,5 +93,7 @@ describe('quality-self-check', () => {
     expect(code).toBe(0)
     expect(lines.some((l) => l.startsWith('gates:'))).toBe(true)
     expect(lines.some((l) => l.startsWith('scope: n.a.'))).toBe(true)
+    // pr-body is no longer gated: a legacy checklist id is reported n.a., never fail.
+    expect(lines).toContain('pr-body: n.a. — unhandled')
   })
 })

@@ -47,6 +47,8 @@ import {
   tryResolveTrivialConflicts,
   mergeOriginMainIfNeeded,
   buildPrBodyWithMetrics,
+  buildPrefilledBody,
+  findOpenspecChange,
   writePushFailures,
   writeRunStarted,
   pushFailPath,
@@ -169,7 +171,7 @@ const envOk = [
 const HELP_SNIPPETS = [
   'usage: pnpm agent <cmd> [--root <repo>] [--json] [--quiet]',
   'preflight [--slug S] [--skip a,b]',
-  'finish --title T --body-file F',
+  'finish --title T [--body-file F]',
   'stamp-green',
   'finalize [slug]',
   'review-brief [--change S] [--base REF] [--rules-json',
@@ -2199,17 +2201,34 @@ describe('finish', () => {
     expect(JSON.parse(r.err).error).toBe('finish create needs --title')
   })
 
-  it('requires --body-file when creating PR', () => {
+  it('prefills the PR body from the template when --body-file is omitted', () => {
     const root = tmpRoot(true)
+    fs.mkdirSync(path.join(root, '.github'), { recursive: true })
+    fs.writeFileSync(
+      path.join(root, '.github/PULL_REQUEST_TEMPLATE.md'),
+      '## Summary\n\n-\n\n## Metrics\n\n<!-- auto -->\n',
+    )
+    let bodyFile = null
     const r = run(['finish', '--json', '--root', root, '--title', 't'], {
       cwd: root,
       exec: finishBase([
         ['git push', { code: 0 }],
         ['gh pr list --head', { stdout: 'null\n' }],
+        ['git log --reverse', { stdout: 'feat: one\nfix: two\n' }],
+        [
+          'gh pr create',
+          (_f, args) => {
+            bodyFile = args[args.indexOf('--body-file') + 1]
+            return { stdout: 'https://example.com/pr/9\n' }
+          },
+        ],
       ]),
       env: {},
     })
-    expect(JSON.parse(r.err).error).toBe('finish create needs --body-file')
+    expect(r.code, r.err).toBe(0)
+    const written = fs.readFileSync(bodyFile, 'utf8')
+    expect(written).toMatch(/## Summary\n\n- feat: one\n- fix: two\n/)
+    expect(written).toMatch(/## Metrics\n\n- wall_time_sec:/)
   })
 
   it('fails when body file is missing', () => {
@@ -4574,5 +4593,100 @@ describe('isLiteTrack', () => {
     expect(isLiteTrack({ tag: 'Lite' })).toBe(true)
     expect(isLiteTrack({ tag: 'feature' })).toBe(false)
     expect(LITE_APPLY_PROCEDURE).toMatch(/no openspec\/changes/)
+  })
+})
+
+describe('buildPrefilledBody', () => {
+  const gitLog = (stdout, code = 0) => () => ({ code, stdout, stderr: '' })
+  const TEMPLATE = [
+    '## Summary',
+    '',
+    '<!-- hint -->',
+    '',
+    '-',
+    '',
+    '## OpenSpec',
+    '',
+    '- Change: `<!-- name or N/A -->`',
+    '',
+    '## Manual test scenarios',
+    '',
+    '1.',
+    '',
+    '## Metrics',
+    '',
+    '<!-- auto -->',
+    '',
+  ].join('\n')
+
+  function withTemplate() {
+    const root = tmpRoot(true)
+    fs.mkdirSync(path.join(root, '.github'), { recursive: true })
+    fs.writeFileSync(
+      path.join(root, '.github/PULL_REQUEST_TEMPLATE.md'),
+      TEMPLATE,
+    )
+    return root
+  }
+
+  it('fills Summary from commit subjects and N/A without a change', () => {
+    const root = withTemplate()
+    const body = buildPrefilledBody(
+      root,
+      'feat/demo',
+      gitLog('feat: a\nfix: b\n'),
+    )
+    expect(body).toContain('## Summary\n\n- feat: a\n- fix: b\n\n## OpenSpec')
+    expect(body).toContain('- Archived: N/A')
+    expect(body).toContain('## Manual test scenarios\n\n1. N/A\n')
+    expect(body).not.toContain('<!--')
+    expect(body).toContain('## Metrics')
+  })
+
+  it('falls back to the branch slug when git log fails', () => {
+    const root = withTemplate()
+    const body = buildPrefilledBody(root, 'feat/demo', gitLog('', 1))
+    expect(body).toContain('## Summary\n\n- demo\n')
+  })
+
+  it('reads OpenSpec + Manual test scenarios from the archived change', () => {
+    const root = withTemplate()
+    const dir = path.join(root, 'openspec/changes/archive/2026-10-30-demo')
+    fs.mkdirSync(dir, { recursive: true })
+    fs.writeFileSync(
+      path.join(dir, 'tasks.md'),
+      '## 1. Work\n\n- [x] a\n\n## Manual test scenarios\n\n1. open it — OK\n2. close it — OK\n\n## Other\n\nx\n',
+    )
+    const body = buildPrefilledBody(root, 'feat/demo', gitLog('feat: a\n'))
+    expect(body).toContain('- Change: `demo`\n- Archived: yes')
+    expect(body).toContain(
+      '## Manual test scenarios\n\n1. open it — OK\n2. close it — OK\n\n## Metrics',
+    )
+  })
+
+  it('uses a built-in template when the repo has none', () => {
+    const root = tmpRoot(true)
+    const body = buildPrefilledBody(root, 'fix/x', gitLog('fix: y\n'))
+    expect(body).toContain('## Summary\n\n- fix: y\n')
+    expect(body).toContain('## Metrics')
+  })
+})
+
+describe('findOpenspecChange', () => {
+  it('prefers archived, then active, else null', () => {
+    const root = tmpRoot()
+    expect(findOpenspecChange(root, 'demo')).toBe(null)
+    const active = path.join(root, 'openspec/changes/demo')
+    fs.mkdirSync(active, { recursive: true })
+    expect(findOpenspecChange(root, 'demo')).toEqual({
+      dir: active,
+      archived: false,
+    })
+    const arch = path.join(root, 'openspec/changes/archive/2026-01-01-demo')
+    fs.mkdirSync(arch, { recursive: true })
+    expect(findOpenspecChange(root, 'demo')).toEqual({
+      dir: arch,
+      archived: true,
+    })
   })
 })

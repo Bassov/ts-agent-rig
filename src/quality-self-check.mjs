@@ -2,7 +2,7 @@
 import { resolveRepoRoot } from './resolve-repo-root.mjs'
 /**
  * Deterministic pre-push self-check: one line per review-checklist id.
- * Reuses pr-policy / diff-size / pr-body (no duplicated ratchet rules).
+ * Reuses pr-policy / diff-size (no duplicated ratchet rules).
  */
 import { spawnSync } from 'node:child_process'
 import fs from 'node:fs'
@@ -11,7 +11,6 @@ import { fileURLToPath } from 'node:url'
 import { readReviewChecklistIds } from './review-checklist.mjs'
 import { runPrPolicyCheck } from './check-gate-ratchet.mjs'
 import { computeDiffSize, checkPlanSize } from './check-diff-size.mjs'
-import { checkPrBody } from './check-pr-body.mjs'
 import { stripGitKeys } from './strip-git-env.mjs'
 
 const ROOT = resolveRepoRoot()
@@ -168,7 +167,6 @@ export function runQualitySelfCheck(opts = {}) {
         'tests-first',
         'evidence',
         'roadmap-follow-ups',
-        'pr-body',
         'english',
         'real-input',
       ]
@@ -233,12 +231,6 @@ export function runQualitySelfCheck(opts = {}) {
       .join(' — ')
     rows.size = { status: 'pass', detail }
   }
-
-  const pr = checkPrBody({ root, body: opts.body, bodyPath: opts.bodyPath })
-  if (pr.skipped) rows['pr-body'] = { status: 'n.a.', detail: pr.reason }
-  else if (!pr.ok)
-    rows['pr-body'] = { status: 'fail', detail: pr.problems.join('; ') }
-  else rows['pr-body'] = { status: 'pass' }
 
   /** @type {string[]} */
   const tasksPaths = []
@@ -308,21 +300,15 @@ export function runQualitySelfCheck(opts = {}) {
 }
 
 export function main(argv = process.argv.slice(2)) {
-  let bodyPath
-  let body
   let changeSlug
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]
-    if (a === '--body-file') bodyPath = argv[++i]
-    else if (a === '--body') body = argv[++i]
+    // --body / --body-file kept for CLI compat; the PR body is no longer gated.
+    if (a === '--body-file' || a === '--body') i++
     else if (a === '--change') changeSlug = argv[++i]
     // --warn-only-size kept for CLI compat; size is always advisory.
   }
-  if (body === undefined && process.env.PR_POLICY_BODY != null)
-    body = process.env.PR_POLICY_BODY
   return runQualitySelfCheck({
-    bodyPath,
-    body,
     changeSlug,
     warnOnlySize: true,
   })

@@ -172,7 +172,7 @@ export function parseArgs(argv) {
 
 const HELP = `usage: pnpm agent <cmd> [--root <repo>] [--json] [--quiet]
   preflight [--slug S] [--skip a,b]   env + roadmap next (+ branch from origin/main); run card
-  finish --title T --body-file F   thin push+PR (≤2/branch; no main merge; warn if stamp stale)
+  finish --title T [--body-file F] thin push+PR (≤2/branch; no main merge; warn if stamp stale)
   stamp-green   write .cache/agent-green-tree (stage 11 after integrity+self-check)
   finalize [slug] [--change S]   stages 10–11: delta-sync check → archive → roadmap done+sync → integrity → self-check → stamp-green
   ci-brief [--pr N] [--watch]   thin CI failure brief (annotations; stage 13)
@@ -1034,6 +1034,7 @@ export function slugFromBranch(name) {
 const PUSH_FAIL_FILE = 'agent-finish-push-failures.json'
 const RUN_STARTED_FILE = 'agent-run-started.json'
 const PR_BODY_METRICS_FILE = 'agent-pr-body-with-metrics.md'
+const PR_BODY_PREFILL_FILE = 'agent-pr-body-prefill.md'
 
 /** Resolve a path inside the git dir (works when `.git` is a file / linked worktree). */
 export function gitPath(root, relPath, exec = defaultExec) {
@@ -1206,6 +1207,102 @@ export function buildPrBodyWithMetrics(
   fs.mkdirSync(path.dirname(out), { recursive: true })
   fs.writeFileSync(out, body)
   return { bodyPath: out, wallTimeSec, tokens }
+}
+
+/** Body of a `## <heading>` section (up to the next `## `), trimmed. */
+function sectionBody(text, heading) {
+  const re = new RegExp(
+    `^## ${heading}\\b[^\\n]*\\n([\\s\\S]*?)(?=^## |(?![\\s\\S]))`,
+    'm',
+  )
+  const m = re.exec(text)
+  return m ? m[1].trim() : ''
+}
+
+/** Replace the body of `## <heading>` in `text`, keeping the heading line. */
+function replaceSection(text, heading, content) {
+  const re = new RegExp(
+    `(^## ${heading}\\b[^\\n]*\\n)[\\s\\S]*?(?=^## |(?![\\s\\S]))`,
+    'm',
+  )
+  return text.replace(re, (_, h) => `${h}\n${content}\n\n`)
+}
+
+/** Archived (preferred) or active OpenSpec change dir for `slug`, or null. */
+export function findOpenspecChange(root, slug) {
+  const changes = path.join(root, 'openspec', 'changes')
+  const archive = path.join(changes, 'archive')
+  if (fs.existsSync(archive)) {
+    const hit = fs
+      .readdirSync(archive, { withFileTypes: true })
+      .filter(
+        (e) =>
+          e.isDirectory() && (e.name === slug || e.name.endsWith(`-${slug}`)),
+      )
+      .map((e) => e.name)
+      .sort()
+      .pop()
+    if (hit) return { dir: path.join(archive, hit), archived: true }
+  }
+  const active = path.join(changes, slug)
+  if (fs.existsSync(active)) return { dir: active, archived: false }
+  return null
+}
+
+const FALLBACK_PR_TEMPLATE =
+  '## Summary\n\n-\n\n## OpenSpec\n\n## Manual test scenarios\n\n1.\n\n## Metrics\n'
+
+/**
+ * Prefill `.github/PULL_REQUEST_TEMPLATE.md`: Summary from commit subjects,
+ * OpenSpec from the (archived) change, Manual test scenarios from tasks.md.
+ * Metrics is filled afterwards by buildPrBodyWithMetrics.
+ */
+export function buildPrefilledBody(root, branch, exec = defaultExec) {
+  const tplPath = path.join(root, '.github', 'PULL_REQUEST_TEMPLATE.md')
+  let body = fs.existsSync(tplPath)
+    ? fs.readFileSync(tplPath, 'utf8')
+    : FALLBACK_PR_TEMPLATE
+  body = body.replace(/<!--[\s\S]*?-->\n?/g, '')
+
+  const slug = slugFromBranch(branch)
+  const log = exec(
+    'git',
+    ['log', '--reverse', '--format=%s', 'origin/main..HEAD'],
+    { cwd: root, env: process.env },
+  )
+  const subjects =
+    log.code === 0
+      ? log.stdout
+          .split('\n')
+          .map((l) => l.trim())
+          .filter(Boolean)
+      : []
+  body = replaceSection(
+    body,
+    'Summary',
+    (subjects.length ? subjects : [slug]).map((l) => `- ${l}`).join('\n'),
+  )
+
+  const change = findOpenspecChange(root, slug)
+  body = replaceSection(
+    body,
+    'OpenSpec',
+    change
+      ? [
+          `- Change: \`${slug}\``,
+          `- Archived: ${change.archived ? 'yes' : 'no'}`,
+          '- Docs/rules updated: yes',
+        ].join('\n')
+      : '- Change: `N/A`\n- Archived: N/A\n- Docs/rules updated: N/A',
+  )
+
+  const tasks = change ? path.join(change.dir, 'tasks.md') : ''
+  const scenarios =
+    tasks && fs.existsSync(tasks)
+      ? sectionBody(fs.readFileSync(tasks, 'utf8'), 'Manual test scenarios')
+      : ''
+  body = replaceSection(body, 'Manual test scenarios', scenarios || '1. N/A')
+  return `${body.replace(/\n{3,}/g, '\n\n').trimEnd()}\n`
 }
 
 /** Path of another worktree that has `branch` checked out, or null. */
@@ -2079,9 +2176,15 @@ export function cmdFinish(o, deps) {
   let metrics = null
   if (!prNumber) {
     if (!o.title) fail('finish create needs --title')
-    if (!o['body-file']) fail('finish create needs --body-file')
-    const bodyPath = path.resolve(cwd, o['body-file'])
-    if (!fs.existsSync(bodyPath)) fail(`body file missing: ${bodyPath}`)
+    let bodyPath
+    if (o['body-file']) {
+      bodyPath = path.resolve(cwd, o['body-file'])
+      if (!fs.existsSync(bodyPath)) fail(`body file missing: ${bodyPath}`)
+    } else {
+      bodyPath = resolveGitRelPath(root, PR_BODY_PREFILL_FILE, exec)
+      fs.mkdirSync(path.dirname(bodyPath), { recursive: true })
+      fs.writeFileSync(bodyPath, buildPrefilledBody(root, branch, exec))
+    }
     metrics = buildPrBodyWithMetrics(bodyPath, root, env, exec)
     const createdPr = mustOk(
       sh(exec, cwd, env, quiet, 'gh', [

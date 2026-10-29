@@ -3,7 +3,7 @@
  * ts-rig-gate <subcommand>
  * pr-policy | gate-values | mutation-scope | codecov-yml | stryker-diff |
  * e2e-changed | e2e-burn-in-targets | e2e-burn-in-count | openspec-budget |
- * patch-coverage | diff-size | pr-body | test-weakening | git-test-isolation
+ * patch-coverage | diff-size | test-weakening | git-test-isolation
  */
 import { spawnSync } from 'node:child_process'
 import path from 'node:path'
@@ -25,7 +25,6 @@ const MAP = {
   'openspec-budget': 'check-openspec-budget.mjs',
   'patch-coverage': 'check-patch-coverage.mjs',
   'diff-size': 'check-diff-size.mjs',
-  'pr-body': 'check-pr-body.mjs',
   'test-weakening': 'check-test-weakening.mjs',
   'git-test-isolation': 'check-no-direct-git-in-tests.mjs',
   'quality-self-check': 'quality-self-check.mjs',
