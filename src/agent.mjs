@@ -1481,6 +1481,19 @@ export function refreshStaleFeatureBranch(exec, root, cwd, env, quiet) {
   }
 }
 
+/** True when `cwd` is a linked worktree (its git dir differs from the common dir). */
+export function isLinkedWorktree(exec, cwd, env, quiet) {
+  const r = sh(exec, cwd, env, quiet, 'git', [
+    'rev-parse',
+    '--path-format=absolute',
+    '--git-dir',
+    '--git-common-dir',
+  ])
+  if (r.code !== 0) return false
+  const [gitDir, common] = String(r.stdout).trim().split('\n')
+  return Boolean(gitDir && common && gitDir.trim() !== common.trim())
+}
+
 export function cmdPreflight(o, deps) {
   const { root, cwd, env, exec, quiet } = deps
   const envInfo = assertEnv(exec, root, cwd, env, quiet)
@@ -1489,7 +1502,9 @@ export function cmdPreflight(o, deps) {
 
   mustOk(sh(exec, cwd, env, quiet, 'git', ['fetch', 'origin']), 'git fetch')
   const slugMode = Boolean(o.slug)
-  if (!slugMode) {
+  // A linked worktree cannot check out main (held by the primary checkout): branch from origin/main.
+  const linked = isLinkedWorktree(exec, cwd, env, quiet)
+  if (!slugMode && !linked) {
     mustOk(
       sh(exec, cwd, env, quiet, 'git', ['switch', 'main']),
       'git switch main',
@@ -1510,7 +1525,7 @@ export function cmdPreflight(o, deps) {
   )
   const item = parseRoadmapNext(nextR.stdout)
   const branch = `${branchPrefixForItem(item)}/${item.slug}`
-  switchFeatureBranch(exec, cwd, env, quiet, branch, slugMode)
+  switchFeatureBranch(exec, cwd, env, quiet, branch, slugMode || linked)
   const stale = refreshStaleFeatureBranch(exec, root, cwd, env, quiet)
   const checklistIds = readReviewChecklistIds(root)
 

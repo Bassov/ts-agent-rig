@@ -4520,6 +4520,119 @@ describe('linked worktree preflight --slug', () => {
   })
 })
 
+describe('linked worktree preflight without --slug', () => {
+  it('does not switch to main (held by primary) and branches from origin/main', () => {
+    const primary = gitInitRepo()
+    gitExec(['branch', '-M', 'main'], primary)
+    fs.mkdirSync(path.join(primary, 'openspec', 'changes'), { recursive: true })
+    fs.writeFileSync(
+      path.join(primary, 'openspec', 'config.yaml'),
+      [
+        'schema: spec-driven',
+        'rules:',
+        '  proposal:',
+        "    - 'Keep proposals under 80 words.'",
+        '',
+      ].join('\n'),
+    )
+    fs.mkdirSync(path.join(primary, 'docs/roadmap/M2.1'), { recursive: true })
+    fs.writeFileSync(
+      path.join(primary, 'docs/roadmap.md'),
+      '# R\n\n## M2.1 — t\n\n- [ ] [prep] [wt-slug](roadmap/M2.1/wt-slug.md) — t\n',
+    )
+    fs.writeFileSync(
+      path.join(primary, 'docs/roadmap/M2.1/wt-slug.md'),
+      '# wt-slug\n\nTag: prep\nMilestone: M2.1\nTitle: t\n',
+    )
+    gitExec(['add', '-A'], primary)
+    gitExec(
+      [
+        '-c',
+        'user.email=t@t.com',
+        '-c',
+        'user.name=t',
+        'commit',
+        '-m',
+        'wt fixture',
+      ],
+      primary,
+    )
+    gitExec(['checkout', '-b', 'origin-main-tmp'], primary)
+    // Simulate origin/main as a local ref the worktree can track.
+    gitExec(['branch', 'origin/main', 'main'], primary)
+    gitExec(['checkout', 'main'], primary)
+    const wt = path.join(os.tmpdir(), `agent-wt-${path.basename(primary)}`)
+    tmpDirs.push(wt)
+    gitExec(['worktree', 'add', '--detach', wt], primary)
+    // Real git for worktree ops; stub only external tools + roadmap next path via thin wrapper.
+    const real = defaultExec
+    const exec = (file, args, opts = {}) => {
+      const key = `${file} ${args.join(' ')}`
+      if (key.includes('node -v'))
+        return { code: 0, stdout: 'v22.0.0\n', stderr: '' }
+      if (key.includes('command -v pnpm'))
+        return { code: 0, stdout: '', stderr: '' }
+      if (key.includes('gh pr list')) return { code: 0, stdout: '', stderr: '' }
+      if (key.includes('pnpm') && key.includes('roadmap next')) {
+        return {
+          code: 0,
+          stdout: JSON.stringify({
+            slug: 'wt-slug',
+            tag: 'prep',
+            title: 't',
+            file: 'docs/roadmap/M2.1/wt-slug.md',
+            milestone: 'M2.1',
+            goal: ['g'],
+          }),
+          stderr: '',
+        }
+      }
+      if (key.includes('openspec new'))
+        return { code: 0, stdout: '', stderr: '' }
+      if (key.includes('openspec status'))
+        return {
+          code: 0,
+          stdout:
+            JSON.stringify({
+              artifacts: [{ id: 'proposal', status: 'ready' }],
+            }) + '\n',
+          stderr: '',
+        }
+      if (key.includes('openspec instructions'))
+        return {
+          code: 0,
+          stdout: JSON.stringify({ template: 'T', rules: ['r'] }),
+          stderr: '',
+        }
+      // Map origin/main for switch --no-track when remote is absent.
+      if (key.includes('git switch -c feat/wt-slug --no-track origin/main')) {
+        return real(
+          'git',
+          ['switch', '-c', 'feat/wt-slug', '--no-track', 'main'],
+          { ...opts, cwd: wt },
+        )
+      }
+      if (key === 'git switch main') throw new Error('preflight must not switch main in a worktree')
+      if (key.includes('git fetch')) return { code: 0, stdout: '', stderr: '' }
+      return real(file, args, { ...opts, cwd: opts.cwd ?? wt })
+    }
+    const r = cmdPreflight(
+      {},
+      { root: wt, cwd: wt, env: {}, exec, quiet: true },
+    )
+    expect(r.ok).toBe(true)
+    expect(r.item.slug).toBe('wt-slug')
+    expect(r.branch).toBe('feat/wt-slug')
+    const br = String(gitExecIsolated(['branch', '--show-current'], wt)).trim()
+    expect(br).toBe('feat/wt-slug')
+    const mainBr = String(
+      gitExecIsolated(['branch', '--show-current'], primary),
+    ).trim()
+    expect(mainBr).toBe('main')
+    expect(readRunStarted(wt)?.branch).toBe('feat/wt-slug')
+  })
+})
+
 describe('E2E_PORT config', () => {
   it('playwright config wires E2E_PORT and disables server reuse', () => {
     const hostRoot = process.env.TS_RIG_HOST_ROOT
