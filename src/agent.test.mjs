@@ -4618,6 +4618,114 @@ describe('finalize', () => {
 })
 
 
+describe('finish stryker gate', () => {
+  function strykerRoot() {
+    const root = tmpRoot(true)
+    fs.writeFileSync(
+      path.join(root, 'package.json'),
+      JSON.stringify({ scripts: { 'stryker:diff': 'ts-rig-gate stryker-diff' } }),
+    )
+    return root
+  }
+  function strykerExec(calls, { files = 'src/a.ts\n', stryker = [1], sha = 'abc\n', body = 'b\n' } = {}) {
+    let n = 0
+    const inner = fakeExec([
+      ...envOk,
+      ['git status --porcelain', { stdout: '' }],
+      ['git branch --show-current', { stdout: 'feat/demo\n' }],
+      ['git rev-list --count origin/main..HEAD', { stdout: '2\n' }],
+      ['git diff --name-only origin/main...HEAD', { stdout: files }],
+      ['git rev-parse HEAD', { stdout: sha }],
+      [
+        'pnpm -s stryker:diff',
+        () => {
+          const code = stryker[Math.min(n, stryker.length - 1)]
+          n += 1
+          return { code, stdout: code ? 'Final mutation score 70 under breaking threshold 85\n' : 'ok\n' }
+        },
+      ],
+      ['git push', { code: 0 }],
+      ['gh pr list --head', { stdout: JSON.stringify({ number: 7, url: 'https://example.com/pr/7' }) }],
+      ['gh pr view', { stdout: body }],
+      ['gh pr edit', { code: 0 }],
+    ])
+    return (file, args, opts) => {
+      calls.push(`${file} ${args.join(' ')}`)
+      return inner(file, args, opts)
+    }
+  }
+  const finishArgs = (root) => ['finish', '--json', '--root', root, '--title', 't']
+
+  it('blocks before push when stryker:diff fails on a src/ change', () => {
+    const root = strykerRoot()
+    const calls = []
+    const r = run(finishArgs(root), { cwd: root, exec: strykerExec(calls), env: {} })
+    const j = JSON.parse(r.out)
+    expect(j.ok).toBe(false)
+    expect(j.stage).toBe('stryker')
+    expect(j.strykerAttempts).toBe(1)
+    expect(j.summary).toContain('run 1/2')
+    expect(j.summary).toContain('under breaking threshold 85')
+    expect(calls.some((c) => c.startsWith('git push'))).toBe(false)
+  })
+
+  it('second failing run proceeds and records the warning in the PR body', () => {
+    const root = strykerRoot()
+    const calls = []
+    run(finishArgs(root), { cwd: root, exec: strykerExec(calls), env: {} })
+    const r = run(finishArgs(root), { cwd: root, exec: strykerExec(calls, { sha: 'def\n' }), env: {} })
+    const j = JSON.parse(r.out)
+    expect(j.ok, r.err).toBe(true)
+    expect(j.stryker).toBe('warn')
+    expect(calls.some((c) => c.startsWith('git push'))).toBe(true)
+    const edit = calls.find((c) => c.startsWith('gh pr edit 7 --body-file'))
+    expect(edit).toBeDefined()
+    const written = fs.readFileSync(edit.split('--body-file ')[1], 'utf8')
+    expect(written).toContain('stryker: deferred to C-session')
+    expect(written).toContain('after 2 runs')
+    expect(written.startsWith('b\n\n')).toBe(true)
+  })
+
+  it('does not duplicate the warning when the PR body already has it', () => {
+    const root = strykerRoot()
+    const calls = []
+    run(finishArgs(root), { cwd: root, exec: strykerExec(calls), env: {} })
+    run(finishArgs(root), {
+      cwd: root,
+      exec: strykerExec(calls, { body: 'x\nstryker: deferred to C-session\n' }),
+      env: {},
+    })
+    expect(calls.some((c) => c.startsWith('gh pr edit'))).toBe(false)
+  })
+
+  it('passes through and caches a pass per HEAD sha', () => {
+    const root = strykerRoot()
+    const calls = []
+    const r = run(finishArgs(root), { cwd: root, exec: strykerExec(calls, { stryker: [0] }), env: {} })
+    expect(JSON.parse(r.out).stryker).toBe('pass')
+    run(finishArgs(root), { cwd: root, exec: strykerExec(calls, { stryker: [0] }), env: {} })
+    expect(calls.filter((c) => c === 'pnpm -s stryker:diff')).toHaveLength(1)
+    expect(calls.some((c) => c.startsWith('gh pr edit'))).toBe(false)
+  })
+
+  it('skips when no src/ file changed', () => {
+    const root = strykerRoot()
+    const calls = []
+    const r = run(finishArgs(root), { cwd: root, exec: strykerExec(calls, { files: 'docs/a.md\nsrcx/b.ts\n' }), env: {} })
+    expect(JSON.parse(r.out).stryker).toBe('skip')
+    expect(calls).not.toContain('pnpm -s stryker:diff')
+  })
+
+  it('skips when the host has no stryker:diff script', () => {
+    const root = tmpRoot(true)
+    fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({ scripts: {} }))
+    const calls = []
+    const r = run(finishArgs(root), { cwd: root, exec: strykerExec(calls), env: {} })
+    expect(JSON.parse(r.out).stryker).toBe('skip')
+    expect(calls).not.toContain('pnpm -s stryker:diff')
+  })
+})
+
 describe('isLiteTrack', () => {
   it('detects lite tag', () => {
     expect(isLiteTrack({ tag: 'lite' })).toBe(true)

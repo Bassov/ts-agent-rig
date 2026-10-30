@@ -172,7 +172,7 @@ export function parseArgs(argv) {
 
 const HELP = `usage: pnpm agent <cmd> [--root <repo>] [--json] [--quiet]
   preflight [--slug S] [--skip a,b]   env + roadmap next (+ branch from origin/main); run card
-  finish --title T [--body-file F] thin push+PR (≤2/branch; no main merge; warn if stamp stale)
+  finish --title T [--body-file F] thin push+PR (≤2/branch; no main merge; warn if stamp stale; src/ diff runs stryker:diff, 2-run cap then PR-body warning)
   stamp-green   write .cache/agent-green-tree (stage 11 after integrity+self-check)
   finalize [slug] [--change S]   stages 10–11: delta-sync check → archive → roadmap done (item file only) → integrity → self-check → stamp-green
   ci-brief [--pr N] [--watch]   thin CI failure brief (annotations; stage 13)
@@ -2055,6 +2055,78 @@ export function cmdCiWait(o, deps) {
   }
 }
 
+const STRYKER_STATE_FILE = 'agent-finish-stryker.json'
+export const STRYKER_FINISH_CAP = 2
+
+export function readStrykerState(root, exec = defaultExec) {
+  const p = gitPath(root, STRYKER_STATE_FILE, exec)
+  if (!fs.existsSync(p)) return {}
+  try {
+    return JSON.parse(fs.readFileSync(p, 'utf8'))
+  } catch {
+    return {}
+  }
+}
+
+export function writeStrykerState(root, map, exec = defaultExec) {
+  const p = gitPath(root, STRYKER_STATE_FILE, exec)
+  fs.mkdirSync(path.dirname(p), { recursive: true })
+  fs.writeFileSync(p, JSON.stringify(map, null, 0) + '\n')
+}
+
+export function hostHasStrykerDiff(root) {
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'))
+    return typeof pkg?.scripts?.['stryker:diff'] === 'string'
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Finish-time mutation gate: when the branch touches src/ and the host has a
+ * `stryker:diff` script, run it (the same gate CI runs: break threshold and
+ * 0 NoCoverage). A failing run blocks finish; after STRYKER_FINISH_CAP
+ * failing runs on a branch finish proceeds with a PR-body warning so the
+ * agent never deadlocks. A pass is cached per HEAD sha.
+ * @returns {{ status: 'skip' | 'pass' | 'block' | 'warn', attempts: number, detail: string }}
+ */
+export function finishStrykerGate(deps, branch) {
+  const { root, cwd, env, exec, quiet } = deps
+  if (!hostHasStrykerDiff(root))
+    return { status: 'skip', attempts: 0, detail: '' }
+  const diff = sh(exec, cwd, env, quiet, 'git', [
+    'diff',
+    '--name-only',
+    'origin/main...HEAD',
+  ])
+  const changed = diff.stdout.split('\n').map((l) => l.trim())
+  if (diff.code !== 0 || !changed.some((f) => f.startsWith('src/')))
+    return { status: 'skip', attempts: 0, detail: '' }
+  const head = sh(exec, cwd, env, quiet, 'git', ['rev-parse', 'HEAD']).stdout.trim()
+  const state = readStrykerState(root, exec)
+  const prev = state[branch] ?? { attempts: 0, passSha: null }
+  if (head && prev.passSha === head)
+    return { status: 'pass', attempts: prev.attempts, detail: 'cached pass' }
+  const r = sh(exec, cwd, env, quiet, 'pnpm', ['-s', 'stryker:diff'])
+  if (r.code === 0) {
+    writeStrykerState(root, { ...state, [branch]: { attempts: prev.attempts, passSha: head } }, exec)
+    return { status: 'pass', attempts: prev.attempts, detail: '' }
+  }
+  const attempts = prev.attempts + 1
+  writeStrykerState(root, { ...state, [branch]: { attempts, passSha: null } }, exec)
+  const detail = tailOutput(r.stdout, r.stderr, 25)
+  return {
+    status: attempts >= STRYKER_FINISH_CAP ? 'warn' : 'block',
+    attempts,
+    detail,
+  }
+}
+
+export function strykerWarningLine(attempts) {
+  return `stryker: deferred to C-session (agent finish: stryker:diff still below the break threshold or NoCoverage > 0 after ${attempts} runs)`
+}
+
 export function cmdFinish(o, deps) {
   const { root, cwd, env, exec, quiet } = deps
   assertEnv(exec, root, cwd, env, quiet)
@@ -2073,6 +2145,18 @@ export function cmdFinish(o, deps) {
       branch,
       ahead,
       summary: `push budget exhausted for ${branch} (${prior} failed attempts recorded under .git/${PUSH_FAIL_FILE})`,
+    }
+  }
+
+  const stryker = (deps.finishStrykerGate ?? finishStrykerGate)(deps, branch)
+  if (stryker.status === 'block') {
+    return {
+      ok: false,
+      stage: 'stryker',
+      strykerAttempts: stryker.attempts,
+      branch,
+      ahead,
+      summary: `stryker:diff failed (run ${stryker.attempts}/${STRYKER_FINISH_CAP}); kill the survivors with real tests, commit, then re-run finish. After run ${STRYKER_FINISH_CAP} finish proceeds with a PR-body warning.\n${stryker.detail}`,
     }
   }
 
@@ -2189,6 +2273,18 @@ export function cmdFinish(o, deps) {
     clearRunStarted(root, exec)
   }
 
+  if (stryker.status === 'warn' && prUrl) {
+    const ref = prNumber ? String(prNumber) : prUrl
+    const cur = sh(exec, cwd, env, quiet, 'gh', ['pr', 'view', ref, '--json', 'body', '-q', '.body'])
+    const line = strykerWarningLine(stryker.attempts)
+    if (cur.code === 0 && !cur.stdout.includes('stryker: deferred to C-session')) {
+      const wp = resolveGitRelPath(root, 'agent-finish-stryker-body.md', exec)
+      fs.mkdirSync(path.dirname(wp), { recursive: true })
+      fs.writeFileSync(wp, `${cur.stdout.replace(/\s+$/, '')}\n\n${line}\n${stryker.detail}\n`)
+      sh(exec, cwd, env, quiet, 'gh', ['pr', 'edit', ref, '--body-file', wp])
+    }
+  }
+
   return {
     ok: true,
     stage: 'pr',
@@ -2198,6 +2294,7 @@ export function cmdFinish(o, deps) {
     prUrl,
     created,
     stampCurrent,
+    stryker: stryker.status,
     metrics: metrics
       ? { wallTimeSec: metrics.wallTimeSec, tokens: metrics.tokens }
       : null,
