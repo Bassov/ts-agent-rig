@@ -1,78 +1,78 @@
 // Agent pipeline CLI library: composite preflight / finish / review-brief.
 // Entry: scripts/agent-cli.mjs (`pnpm agent`). Zero deps, Node 22, ESM.
-import { execFileSync } from 'node:child_process'
-import fs from 'node:fs'
-import { createRequire } from 'node:module'
-import path from 'node:path'
-import { readReviewChecklistIds } from './review-checklist.mjs'
+import { execFileSync } from "node:child_process";
+import fs from "node:fs";
+import { createRequire } from "node:module";
+import path from "node:path";
+import { readReviewChecklistIds } from "./review-checklist.mjs";
 import {
   checkPlanSize,
   computeDiffSize,
   DIFF_SIZE_MAX,
-} from './check-diff-size.mjs'
+} from "./check-diff-size.mjs";
 import {
   greenTreeStampPath,
   isGreenTreeStampCurrent,
   writeGreenTreeStamp,
-} from './green-tree-stamp.mjs'
+} from "./green-tree-stamp.mjs";
 import {
   archiveOpenSpecChange,
   ensureOpenSpecChange,
   loadNativeArtifactInstructions,
   openSpecChangeStatus,
-} from './openspec-native.mjs'
-import { CiBriefError, runCiBrief } from './ci-brief.mjs'
-import { runCiWait } from './ci-wait.mjs'
+} from "./openspec-native.mjs";
+import { CiBriefError, runCiBrief } from "./ci-brief.mjs";
+import { runCiWait } from "./ci-wait.mjs";
 
-const nodeRequire = createRequire(import.meta.url)
+const nodeRequire = createRequire(import.meta.url);
 
-export { readReviewChecklistIds }
+export { readReviewChecklistIds };
 
 export class AgentError extends Error {
   constructor(msg, code = 2) {
-    super(msg)
-    this.exitCode = code
+    super(msg);
+    this.exitCode = code;
   }
 }
 const fail = (m, code = 2) => {
-  throw new AgentError(m, code)
-}
+  throw new AgentError(m, code);
+};
 
-const ANSI_RE = /\x1B\[[0-9;]*[A-Za-z]/g
-export const stripAnsi = (s) => String(s ?? '').replace(ANSI_RE, '')
+const ANSI_RE = /\x1B\[[0-9;]*[A-Za-z]/g;
+export const stripAnsi = (s) => String(s ?? "").replace(ANSI_RE, "");
 
 /** Max bytes for outside-touch-set preview in review-brief (stat + untracked lines). */
-export const OUTSIDE_TOUCH_PREVIEW_MAX = 2048
+export const OUTSIDE_TOUCH_PREVIEW_MAX = 2048;
 
 export function capOutsideTouchPreview(text) {
-  const s = String(text ?? '')
-  if (s.length <= OUTSIDE_TOUCH_PREVIEW_MAX) return s
-  return `${s.slice(0, OUTSIDE_TOUCH_PREVIEW_MAX)}\n… (truncated, ${s.length} bytes total)`
+  const s = String(text ?? "");
+  if (s.length <= OUTSIDE_TOUCH_PREVIEW_MAX) return s;
+  return `${s.slice(0, OUTSIDE_TOUCH_PREVIEW_MAX)}\n… (truncated, ${s.length} bytes total)`;
 }
 
 /** Last N non-empty-trimmed lines of combined streams (for failure reports). */
 export function tailOutput(stdout, stderr, n = 60) {
-  const combined = stripAnsi(`${stdout ?? ''}\n${stderr ?? ''}`.trim())
-  if (!combined) return '(no output)'
-  const lines = combined.split('\n')
-  return lines.slice(-n).join('\n')
+  const combined = stripAnsi(`${stdout ?? ""}\n${stderr ?? ""}`.trim());
+  if (!combined) return "(no output)";
+  const lines = combined.split("\n");
+  return lines.slice(-n).join("\n");
 }
 
-const BOOL = new Set(['json', 'quiet', 'help', 'plan', 'watch'])
+const BOOL = new Set(["json", "quiet", "help", "plan", "watch"]);
 const VALUE = new Set([
-  'root',
-  'change',
-  'title',
-  'body-file',
-  'rules-json',
-  'skip',
-  'slug',
-  'base',
-  'out',
-  'base-url',
-  'pr',
-  'timeout',
-])
+  "root",
+  "change",
+  "title",
+  "body-file",
+  "rules-json",
+  "skip",
+  "slug",
+  "base",
+  "out",
+  "base-url",
+  "pr",
+  "timeout",
+]);
 
 /** ≤10-line apply/archive procedure embedded in the preflight run card. */
 export const APPLY_ARCHIVE_PROCEDURE = `\
@@ -80,7 +80,7 @@ Apply/archive (≤10):
 1. Follow host docs/agent-loop.md for orchestration (stages, A/B/C, commit rules, stamp, thin finish).
 2. Artifact how: openspec/config.yaml rules + operations; reviewers = host reviewer subagents (see docs/agent-loop.md).
 Explore: grep ≤30; offset/limit if >400 lines; no re-read; no TodoWrite in -p.
-Task shape: reviewer skill set + brief file path only.`
+Task shape: reviewer skill set + brief file path only.`;
 
 /** Prep/contingency fast-track when Tag: prep|contingency + concrete Scope/Done when. */
 export const PREP_APPLY_ARCHIVE_PROCEDURE = `\
@@ -89,85 +89,83 @@ Apply/archive prep fast-track (≤10):
 2. Brief proposal.md + tasks.md; skip design.md unless arch/security; skip_specs:true if no src/ capability behavior change (touch .skip-specs / .skip-design). Skip openspec-planning-reviewer.
 3. Else execute the same loop SoT (implement → quality phases → archive → finish).
 Explore: grep ≤30; offset/limit if >400; no re-read; no TodoWrite in -p.
-Task shape: skill set + brief path only.`
+Task shape: skill set + brief path only.`;
 export const LITE_APPLY_PROCEDURE = `\
 Lite track (≤10):
 1. Follow host docs/agent-loop.md lite routing (no openspec/changes, no planning reviewer, no archive).
 2. Roadmap item + PR body are the plan; still run A, B (changed specs), ui-review/smoke when UI, implementation reviewer, roadmap done.
 3. Escalate to normal OpenSpec track if apply grows or touches domain behavior.
-`
-
-
+`;
 
 /** True when body has ## Scope, a checkbox, and - **Done when:**. */
 export function hasPrepConcreteScope(body) {
-  const t = String(body ?? '')
+  const t = String(body ?? "");
   return (
     /^## Scope\b/m.test(t) &&
     /^- \[[ xX]\] /m.test(t) &&
     /^- \*\*Done when:\*\*/m.test(t)
-  )
+  );
 }
 
 export function introducesNewSrcCapability(root, body) {
-  const t = String(body ?? '')
-  const re = /(?:^|[\s`('"])src\/([a-z0-9-]+)\/?/g
-  const seen = new Set()
+  const t = String(body ?? "");
+  const re = /(?:^|[\s`('"])src\/([a-z0-9-]+)\/?/g;
+  const seen = new Set();
   for (let m; (m = re.exec(t));) {
-    const cap = m[1]
-    if (!cap || seen.has(cap)) continue
-    seen.add(cap)
-    if (!fs.existsSync(path.join(root, 'src', cap))) return true
+    const cap = m[1];
+    if (!cap || seen.has(cap)) continue;
+    seen.add(cap);
+    if (!fs.existsSync(path.join(root, "src", cap))) return true;
   }
-  return false
+  return false;
 }
 
 export function isPrepFastTrack(item, root) {
-  const tag = String(item?.tag ?? '').toLowerCase()
-  if (!(tag === 'prep' || tag === 'contingency')) return false
-  if (!hasPrepConcreteScope(item?.body)) return false
-  if (root && introducesNewSrcCapability(root, item?.body)) return false
-  return true
+  const tag = String(item?.tag ?? "").toLowerCase();
+  if (!(tag === "prep" || tag === "contingency")) return false;
+  if (!hasPrepConcreteScope(item?.body)) return false;
+  if (root && introducesNewSrcCapability(root, item?.body)) return false;
+  return true;
 }
 
 /** Roadmap Tag: lite — no openspec/changes; item + PR body are the plan. */
 export function isLiteTrack(item) {
-  return String(item?.tag ?? '').toLowerCase() === 'lite'
+  return String(item?.tag ?? "").toLowerCase() === "lite";
 }
 
-export const STATS_PEAK_CONTEXT_MAX = 300_000
-export const STATS_FIRST_ROUND_INPUT_MAX = 400_000
+export const STATS_PEAK_CONTEXT_MAX = 300_000;
+export const STATS_FIRST_ROUND_INPUT_MAX = 400_000;
 
 export function parseArgs(argv) {
-  const o = { _: [] }
+  const o = { _: [] };
   for (let i = 0; i < argv.length; i++) {
-    const a = argv[i]
-    if (!a.startsWith('--')) {
-      o._.push(a)
-      continue
+    const a = argv[i];
+    if (!a.startsWith("--")) {
+      o._.push(a);
+      continue;
     }
     let k = a.slice(2),
-      v
-    const eq = k.indexOf('=')
+      v;
+    const eq = k.indexOf("=");
     if (eq >= 0) {
-      v = k.slice(eq + 1)
-      k = k.slice(0, eq)
+      v = k.slice(eq + 1);
+      k = k.slice(0, eq);
     }
     if (BOOL.has(k)) {
-      o[k] = true
-      continue
+      o[k] = true;
+      continue;
     }
-    if (!VALUE.has(k)) fail(`unknown option --${k}`)
+    if (!VALUE.has(k)) fail(`unknown option --${k}`);
     if (v === undefined) {
-      v = argv[++i]
-      if (v === undefined || v.startsWith('--'))
+      v = argv[++i];
+      if (v === undefined || v.startsWith("--"))
         fail(
           `--${k} needs a value (use --${k}=<value> for values starting with --)`,
-        )
+        );
     }
-    o[k] = v
+    o[k] = v;
   }
-  return o
+  return o;
 }
 
 const HELP = `usage: pnpm agent <cmd> [--root <repo>] [--json] [--quiet]
@@ -186,7 +184,7 @@ const HELP = `usage: pnpm agent <cmd> [--root <repo>] [--json] [--quiet]
   help
 
 Requires POSIX shell, Node matching .nvmrc, and pnpm/gh/git on PATH
-(source scripts/agent-env.sh). Prefer --json for machine branching.`
+(source scripts/agent-env.sh). Prefer --json for machine branching.`;
 
 /** @typedef {{ code: number, stdout: string, stderr: string }} ExecResult */
 /** @typedef {(file: string, args: string[], opts?: object) => ExecResult} ExecFn */
@@ -197,74 +195,74 @@ Requires POSIX shell, Node matching .nvmrc, and pnpm/gh/git on PATH
  * Does not strip GIT_SSH* / GIT_TERMINAL_PROMPT / other non-local keys.
  */
 export const GIT_LOCAL_ENV_VARS = [
-  'GIT_ALTERNATE_OBJECT_DIRECTORIES',
-  'GIT_COMMON_DIR',
-  'GIT_CONFIG',
-  'GIT_CONFIG_COUNT',
-  'GIT_CONFIG_PARAMETERS',
-  'GIT_DIR',
-  'GIT_GRAFT_FILE',
-  'GIT_IMPLICIT_WORK_TREE',
-  'GIT_INDEX_FILE',
-  'GIT_INTERNAL_SUPER_PREFIX',
-  'GIT_NO_REPLACE_OBJECTS',
-  'GIT_OBJECT_DIRECTORY',
-  'GIT_PREFIX',
-  'GIT_REPLACE_REF_BASE',
-  'GIT_SHALLOW_FILE',
-  'GIT_WORK_TREE',
-]
+  "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+  "GIT_COMMON_DIR",
+  "GIT_CONFIG",
+  "GIT_CONFIG_COUNT",
+  "GIT_CONFIG_PARAMETERS",
+  "GIT_DIR",
+  "GIT_GRAFT_FILE",
+  "GIT_IMPLICIT_WORK_TREE",
+  "GIT_INDEX_FILE",
+  "GIT_INTERNAL_SUPER_PREFIX",
+  "GIT_NO_REPLACE_OBJECTS",
+  "GIT_OBJECT_DIRECTORY",
+  "GIT_PREFIX",
+  "GIT_REPLACE_REF_BASE",
+  "GIT_SHALLOW_FILE",
+  "GIT_WORK_TREE",
+];
 
 /** Drop ambient repo-local GIT_* overrides so `cwd` wins. */
 export function execEnvForCwd(env = process.env) {
-  const out = { ...env }
-  for (const key of GIT_LOCAL_ENV_VARS) delete out[key]
-  return out
+  const out = { ...env };
+  for (const key of GIT_LOCAL_ENV_VARS) delete out[key];
+  return out;
 }
 
 export function defaultExec(file, args, opts = {}) {
   try {
-    const env = execEnvForCwd(opts.env ?? process.env)
+    const env = execEnvForCwd(opts.env ?? process.env);
     const stdout = execFileSync(file, args, {
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'pipe'],
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
       ...opts,
       env,
-    })
-    return { code: 0, stdout: String(stdout), stderr: '' }
+    });
+    return { code: 0, stdout: String(stdout), stderr: "" };
   } catch (e) {
-    const code = typeof e.status === 'number' ? e.status : 1
-    const stdout = String(e.stdout ?? '')
-    const stderr = String(e.stderr ?? '')
+    const code = typeof e.status === "number" ? e.status : 1;
+    const stdout = String(e.stdout ?? "");
+    const stderr = String(e.stderr ?? "");
     if (!stdout && !stderr && e.message)
-      return { code, stdout: '', stderr: String(e.message) }
-    return { code, stdout, stderr }
+      return { code, stdout: "", stderr: String(e.message) };
+    return { code, stdout, stderr };
   }
 }
 
 /** `git diff --no-index` exits 1 when files differ; treat 0/1 as success. */
 export function mustOkDiffNoIndex(r, label) {
-  if (r.code === 0 || r.code === 1) return r
+  if (r.code === 0 || r.code === 1) return r;
   fail(
     `${label} failed (exit ${r.code}):\n${tailOutput(r.stdout, r.stderr)}`,
     r.code || 1,
-  )
+  );
 }
 
 function wantQuiet(o, env) {
-  return !!(o.quiet || env.CI)
+  return !!(o.quiet || env.CI);
 }
 
 function sh(exec, cwd, env, quiet, file, args, opts = {}) {
-  const r = exec(file, args, { cwd, env, ...opts })
+  const r = exec(file, args, { cwd, env, ...opts });
   if (quiet) {
     return {
       ...r,
       stdout: stripAnsi(r.stdout),
       stderr: stripAnsi(r.stderr),
-    }
+    };
   }
-  return r
+  return r;
 }
 
 export function mustOk(r, label) {
@@ -272,129 +270,129 @@ export function mustOk(r, label) {
     fail(
       `${label} failed (exit ${r.code}):\n${tailOutput(r.stdout, r.stderr)}`,
       r.code || 1,
-    )
-  return r
+    );
+  return r;
 }
 
 export function readNvmrcMajor(root) {
-  const p = path.join(root, '.nvmrc')
-  if (!fs.existsSync(p)) return null
-  const v = fs.readFileSync(p, 'utf8').trim().replace(/^v/, '')
-  const maj = Number.parseInt(v.split('.')[0], 10)
-  return Number.isFinite(maj) ? maj : null
+  const p = path.join(root, ".nvmrc");
+  if (!fs.existsSync(p)) return null;
+  const v = fs.readFileSync(p, "utf8").trim().replace(/^v/, "");
+  const maj = Number.parseInt(v.split(".")[0], 10);
+  return Number.isFinite(maj) ? maj : null;
 }
 
 function nodeMajor(exec, cwd, env, quiet) {
-  const r = sh(exec, cwd, env, quiet, 'node', ['-v'])
-  if (r.code !== 0) return null
-  const m = /^v(\d+)/.exec(r.stdout.trim())
-  return m ? Number(m[1]) : null
+  const r = sh(exec, cwd, env, quiet, "node", ["-v"]);
+  if (r.code !== 0) return null;
+  const m = /^v(\d+)/.exec(r.stdout.trim());
+  return m ? Number(m[1]) : null;
 }
 
 function assertEnv(exec, root, cwd, env, quiet) {
-  const want = readNvmrcMajor(root)
-  const got = nodeMajor(exec, cwd, env, quiet)
+  const want = readNvmrcMajor(root);
+  const got = nodeMajor(exec, cwd, env, quiet);
   if (want !== null && got !== want)
     fail(
-      `node major is ${got ?? 'missing'}; need ${want} from .nvmrc (source scripts/agent-env.sh)`,
-    )
-  const pnpm = sh(exec, cwd, env, quiet, 'sh', [
-    '-c',
-    'command -v pnpm >/dev/null',
-  ])
+      `node major is ${got ?? "missing"}; need ${want} from .nvmrc (source scripts/agent-env.sh)`,
+    );
+  const pnpm = sh(exec, cwd, env, quiet, "sh", [
+    "-c",
+    "command -v pnpm >/dev/null",
+  ]);
   if (pnpm.code !== 0)
-    fail('pnpm not on PATH (source scripts/agent-env.sh once)')
-  return { nodeMajor: got, nvmrcMajor: want }
+    fail("pnpm not on PATH (source scripts/agent-env.sh once)");
+  return { nodeMajor: got, nvmrcMajor: want };
 }
 
 function porcelain(exec, cwd, env, quiet) {
-  return sh(exec, cwd, env, quiet, 'git', [
-    'status',
-    '--porcelain',
-  ]).stdout.trim()
+  return sh(exec, cwd, env, quiet, "git", [
+    "status",
+    "--porcelain",
+  ]).stdout.trim();
 }
 
 export function branchPrefixForItem(item) {
-  if (item.tag === 'fix' || /\bbug\b/i.test(item.title ?? '')) return 'fix'
-  return 'feat'
+  if (item.tag === "fix" || /\bbug\b/i.test(item.title ?? "")) return "fix";
+  return "feat";
 }
 
 export function isFeatureBranch(name) {
-  return /^(feat|fix)\//.test(name)
+  return /^(feat|fix)\//.test(name);
 }
 
 export function slugFromFeatFix(name) {
-  const m = /^(?:feat|fix)\/(.+)$/.exec(String(name).trim())
-  return m ? m[1] : null
+  const m = /^(?:feat|fix)\/(.+)$/.exec(String(name).trim());
+  return m ? m[1] : null;
 }
 
 export function collectSkipSlugs(exec, cwd, env, quiet, extra) {
-  const fromExtra = (extra ?? '')
-    .split(',')
+  const fromExtra = (extra ?? "")
+    .split(",")
     .map((s) => s.trim())
-    .filter(Boolean)
-  const pr = sh(exec, cwd, env, quiet, 'gh', [
-    'pr',
-    'list',
-    '--state',
-    'open',
-    '--json',
-    'headRefName',
-    '-q',
-    '.[].headRefName',
-  ])
+    .filter(Boolean);
+  const pr = sh(exec, cwd, env, quiet, "gh", [
+    "pr",
+    "list",
+    "--state",
+    "open",
+    "--json",
+    "headRefName",
+    "-q",
+    ".[].headRefName",
+  ]);
   if (pr.code !== 0)
     fail(
       `gh pr list failed (cannot build skip-list):\n${tailOutput(pr.stdout, pr.stderr)}`,
       pr.code || 1,
-    )
+    );
   const prSlugs = pr.stdout
-    .split('\n')
+    .split("\n")
     .map((l) => l.trim())
     .filter(Boolean)
-    .map((b) => b.replace(/^(feat|fix)\//, ''))
-  const br = sh(exec, cwd, env, quiet, 'git', ['branch', '-r'])
+    .map((b) => b.replace(/^(feat|fix)\//, ""));
+  const br = sh(exec, cwd, env, quiet, "git", ["branch", "-r"]);
   if (br.code !== 0)
     fail(
       `git branch -r failed:\n${tailOutput(br.stdout, br.stderr)}`,
       br.code || 1,
-    )
+    );
   const remoteSlugs = br.stdout
-    .split('\n')
+    .split("\n")
     .map((l) => {
-      const m = /origin\/(feat|fix)\/(\S+)/.exec(l.trim())
-      return m ? m[2] : null
+      const m = /origin\/(feat|fix)\/(\S+)/.exec(l.trim());
+      return m ? m[2] : null;
     })
-    .filter(Boolean)
-  const local = sh(exec, cwd, env, quiet, 'git', [
-    'branch',
-    '--format=%(refname:short)',
-  ])
+    .filter(Boolean);
+  const local = sh(exec, cwd, env, quiet, "git", [
+    "branch",
+    "--format=%(refname:short)",
+  ]);
   if (local.code !== 0)
     fail(
       `git branch failed:\n${tailOutput(local.stdout, local.stderr)}`,
       local.code || 1,
-    )
+    );
   const localSlugs = local.stdout
-    .split('\n')
+    .split("\n")
     .map((l) => slugFromFeatFix(l))
-    .filter(Boolean)
-  const wt = sh(exec, cwd, env, quiet, 'git', [
-    'worktree',
-    'list',
-    '--porcelain',
-  ])
+    .filter(Boolean);
+  const wt = sh(exec, cwd, env, quiet, "git", [
+    "worktree",
+    "list",
+    "--porcelain",
+  ]);
   if (wt.code !== 0)
     fail(
       `git worktree list failed:\n${tailOutput(wt.stdout, wt.stderr)}`,
       wt.code || 1,
-    )
-  const worktreeSlugs = []
-  for (const line of wt.stdout.split('\n')) {
-    const m = /^branch refs\/heads\/(.+)$/.exec(line.trim())
-    if (!m) continue
-    const s = slugFromFeatFix(m[1])
-    if (s) worktreeSlugs.push(s)
+    );
+  const worktreeSlugs = [];
+  for (const line of wt.stdout.split("\n")) {
+    const m = /^branch refs\/heads\/(.+)$/.exec(line.trim());
+    if (!m) continue;
+    const s = slugFromFeatFix(m[1]);
+    if (s) worktreeSlugs.push(s);
   }
   return [
     ...new Set([
@@ -404,49 +402,49 @@ export function collectSkipSlugs(exec, cwd, env, quiet, extra) {
       ...localSlugs,
       ...worktreeSlugs,
     ]),
-  ]
+  ];
 }
 
 export function parseRoadmapNext(text) {
   try {
-    const j = JSON.parse(text)
-    if (!j?.slug) fail('roadmap next JSON missing slug')
-    return j
+    const j = JSON.parse(text);
+    if (!j?.slug) fail("roadmap next JSON missing slug");
+    return j;
   } catch (e) {
-    if (e instanceof AgentError) throw e
-    const lines = text.split('\n')
+    if (e instanceof AgentError) throw e;
+    const lines = text.split("\n");
     const get = (k) => {
-      const line = lines.find((l) => l.startsWith(`${k}:`))
-      return line ? line.slice(k.length + 1).trim() : null
-    }
+      const line = lines.find((l) => l.startsWith(`${k}:`));
+      return line ? line.slice(k.length + 1).trim() : null;
+    };
     const goals = lines
-      .filter((l) => l.startsWith('goal:'))
-      .map((l) => l.slice(5).trim())
-    const slug = get('slug')
-    if (!slug) fail('roadmap next produced no slug')
-    const bodyIdx = lines.indexOf('---')
+      .filter((l) => l.startsWith("goal:"))
+      .map((l) => l.slice(5).trim());
+    const slug = get("slug");
+    if (!slug) fail("roadmap next produced no slug");
+    const bodyIdx = lines.indexOf("---");
     return {
       slug,
-      tag: get('tag'),
-      title: get('title'),
-      file: get('file'),
-      milestone: get('milestone'),
+      tag: get("tag"),
+      title: get("title"),
+      file: get("file"),
+      milestone: get("milestone"),
       goal: goals,
-      body: bodyIdx >= 0 ? lines.slice(bodyIdx + 1).join('\n') : undefined,
-    }
+      body: bodyIdx >= 0 ? lines.slice(bodyIdx + 1).join("\n") : undefined,
+    };
   }
 }
 
 export function parseInstructions(stdout) {
-  const j = JSON.parse(stdout)
-  return { template: j.template ?? null, rules: j.rules ?? null }
+  const j = JSON.parse(stdout);
+  return { template: j.template ?? null, rules: j.rules ?? null };
 }
 
 /** Ready OpenSpec artifact ids from `openspec status --json`. */
 export function readyArtifactIds(statusJson) {
-  const arts = statusJson?.artifacts
-  if (!Array.isArray(arts)) return []
-  return arts.filter((a) => a && a.status === 'ready').map((a) => a.id)
+  const arts = statusJson?.artifacts;
+  if (!Array.isArray(arts)) return [];
+  return arts.filter((a) => a && a.status === "ready").map((a) => a.id);
 }
 
 /**
@@ -457,9 +455,9 @@ export function readyArtifactIds(statusJson) {
  */
 export function loadArtifactInstructions(root, artifactId, _change) {
   try {
-    return loadNativeArtifactInstructions(root, artifactId)
+    return loadNativeArtifactInstructions(root, artifactId);
   } catch (e) {
-    fail(`openspec instructions failed: ${e instanceof Error ? e.message : e}`)
+    fail(`openspec instructions failed: ${e instanceof Error ? e.message : e}`);
   }
 }
 
@@ -469,13 +467,13 @@ export function loadArtifactInstructions(root, artifactId, _change) {
  * @param {{ prepFastTrack?: boolean }} [opts]
  */
 export function buildRunCard(root, changeSlug, opts = {}) {
-  const prepFastTrack = Boolean(opts.prepFastTrack)
-  const status = openSpecChangeStatus(root, changeSlug, { prepFastTrack })
-  const ready = readyArtifactIds(status)
+  const prepFastTrack = Boolean(opts.prepFastTrack);
+  const status = openSpecChangeStatus(root, changeSlug, { prepFastTrack });
+  const ready = readyArtifactIds(status);
   /** @type {Record<string, { template: string|null, rules: unknown }>} */
-  const artifacts = {}
+  const artifacts = {};
   for (const id of ready) {
-    artifacts[id] = loadArtifactInstructions(root, id, changeSlug)
+    artifacts[id] = loadArtifactInstructions(root, id, changeSlug);
   }
   return {
     ready,
@@ -484,36 +482,36 @@ export function buildRunCard(root, changeSlug, opts = {}) {
       ? PREP_APPLY_ARCHIVE_PROCEDURE
       : APPLY_ARCHIVE_PROCEDURE,
     prepFastTrack,
-  }
+  };
 }
 
 /** Cursor store.db estimate: chars ÷ 3.3 ≈ tokens (stated as estimate in output). */
-export const STATS_CHARS_PER_TOKEN = 3.3
+export const STATS_CHARS_PER_TOKEN = 3.3;
 
 export function estimateTokensFromChars(chars) {
-  const n = Number(chars)
+  const n = Number(chars);
   if (!Number.isFinite(n) || n < 0)
-    fail('estimateTokensFromChars needs a non-negative number')
-  return Math.round(n / STATS_CHARS_PER_TOKEN)
+    fail("estimateTokensFromChars needs a non-negative number");
+  return Math.round(n / STATS_CHARS_PER_TOKEN);
 }
 
 /** Flatten user/system string or text-part content for classification. */
 export function userMessageText(msg) {
-  const c = msg?.content
-  if (typeof c === 'string') return c
-  if (!Array.isArray(c)) return ''
-  const parts = []
+  const c = msg?.content;
+  if (typeof c === "string") return c;
+  if (!Array.isArray(c)) return "";
+  const parts = [];
   for (const p of c) {
     if (
       p &&
-      typeof p === 'object' &&
-      p.type === 'text' &&
-      typeof p.text === 'string'
+      typeof p === "object" &&
+      p.type === "text" &&
+      typeof p.text === "string"
     ) {
-      parts.push(p.text)
+      parts.push(p.text);
     }
   }
-  return parts.join('\n')
+  return parts.join("\n");
 }
 
 /**
@@ -522,35 +520,35 @@ export function userMessageText(msg) {
  * inside a normal prompt body do not count.
  */
 export function isSystemNotificationUser(msg) {
-  if (msg?.role !== 'user') return false
-  let t = userMessageText(msg).trimStart()
-  const ts = /^<timestamp>[\s\S]*?<\/timestamp>\s*/.exec(t)
-  if (ts) t = t.slice(ts[0].length)
-  return t.startsWith('<system_notification>')
+  if (msg?.role !== "user") return false;
+  let t = userMessageText(msg).trimStart();
+  const ts = /^<timestamp>[\s\S]*?<\/timestamp>\s*/.exec(t);
+  if (ts) t = t.slice(ts[0].length);
+  return t.startsWith("<system_notification>");
 }
 
 export function isUserInfoPreamble(msg) {
   return (
-    msg?.role === 'user' &&
-    userMessageText(msg).trimStart().startsWith('<user_info>')
-  )
+    msg?.role === "user" &&
+    userMessageText(msg).trimStart().startsWith("<user_info>")
+  );
 }
 
 export function isRoundStartingUser(msg) {
   return (
-    msg?.role === 'user' &&
+    msg?.role === "user" &&
     !isSystemNotificationUser(msg) &&
     !isUserInfoPreamble(msg)
-  )
+  );
 }
 
 function jsonValueChars(v) {
-  if (v == null) return 0
-  if (typeof v === 'string') return v.length
+  if (v == null) return 0;
+  if (typeof v === "string") return v.length;
   try {
-    return JSON.stringify(v).length
+    return JSON.stringify(v).length;
   } catch {
-    return 0
+    return 0;
   }
 }
 
@@ -560,39 +558,39 @@ function jsonValueChars(v) {
  * providerOptions, ids, and other metadata.
  */
 export function messageContentChars(msg) {
-  if (!msg || typeof msg !== 'object') return 0
-  const c = msg.content
-  if (typeof c === 'string') return c.length
-  if (!Array.isArray(c)) return 0
-  let n = 0
+  if (!msg || typeof msg !== "object") return 0;
+  const c = msg.content;
+  if (typeof c === "string") return c.length;
+  if (!Array.isArray(c)) return 0;
+  let n = 0;
   for (const p of c) {
-    if (!p || typeof p !== 'object') continue
-    const t = p.type
-    if (t === 'text' || t === 'reasoning') {
-      if (typeof p.text === 'string') n += p.text.length
-    } else if (t === 'tool-call') {
-      if (typeof p.toolName === 'string') n += p.toolName.length
-      n += jsonValueChars(p.args ?? p.input)
-    } else if (t === 'tool-result' || t === 'tool_result') {
-      n += jsonValueChars(p.result)
+    if (!p || typeof p !== "object") continue;
+    const t = p.type;
+    if (t === "text" || t === "reasoning") {
+      if (typeof p.text === "string") n += p.text.length;
+    } else if (t === "tool-call") {
+      if (typeof p.toolName === "string") n += p.toolName.length;
+      n += jsonValueChars(p.args ?? p.input);
+    } else if (t === "tool-result" || t === "tool_result") {
+      n += jsonValueChars(p.result);
     }
   }
-  return n
+  return n;
 }
 
 /** Read protobuf varint; returns [value, nextOffset]. */
 export function readProtobufVarint(buf, offset) {
-  let x = 0
-  let s = 0
-  let i = offset
+  let x = 0;
+  let s = 0;
+  let i = offset;
   while (i < buf.length) {
-    const c = buf[i++]
-    x |= (c & 0x7f) << s
-    if ((c & 0x80) === 0) return [x, i]
-    s += 7
-    if (s > 70) fail('protobuf varint too long')
+    const c = buf[i++];
+    x |= (c & 0x7f) << s;
+    if ((c & 0x80) === 0) return [x, i];
+    s += 7;
+    if (s > 70) fail("protobuf varint too long");
   }
-  fail('protobuf varint truncated')
+  fail("protobuf varint truncated");
 }
 
 /**
@@ -600,48 +598,48 @@ export function readProtobufVarint(buf, offset) {
  * (hex id = digest.toString('hex')).
  */
 export function blobIdsFromRootProtobuf(rootBuf) {
-  const buf = Buffer.isBuffer(rootBuf) ? rootBuf : Buffer.from(rootBuf)
-  const ids = []
-  let i = 0
+  const buf = Buffer.isBuffer(rootBuf) ? rootBuf : Buffer.from(rootBuf);
+  const ids = [];
+  let i = 0;
   while (i < buf.length) {
-    const [tag, i1] = readProtobufVarint(buf, i)
-    i = i1
-    const field = tag >>> 3
-    const wire = tag & 7
+    const [tag, i1] = readProtobufVarint(buf, i);
+    i = i1;
+    const field = tag >>> 3;
+    const wire = tag & 7;
     if (wire === 0) {
-      ;[, i] = readProtobufVarint(buf, i)
+      [, i] = readProtobufVarint(buf, i);
     } else if (wire === 1) {
-      i += 8
+      i += 8;
     } else if (wire === 5) {
-      i += 4
+      i += 4;
     } else if (wire === 2) {
-      const [len, i2] = readProtobufVarint(buf, i)
-      i = i2
-      const slice = buf.subarray(i, i + len)
-      i += len
+      const [len, i2] = readProtobufVarint(buf, i);
+      i = i2;
+      const slice = buf.subarray(i, i + len);
+      i += len;
       if (field === 1 && slice.length === 32)
-        ids.push(Buffer.from(slice).toString('hex'))
+        ids.push(Buffer.from(slice).toString("hex"));
     } else {
-      fail(`unsupported protobuf wire type ${wire}`)
+      fail(`unsupported protobuf wire type ${wire}`);
     }
   }
-  return ids
+  return ids;
 }
 
 export function roundFromCursorUsage(usage, modelCalls = 1) {
-  if (!usage || typeof usage !== 'object') fail('usage object required')
-  const input = Number(usage.inputTokens)
-  const output = Number(usage.outputTokens)
-  const cacheRead = Number(usage.cacheReadTokens ?? 0)
+  if (!usage || typeof usage !== "object") fail("usage object required");
+  const input = Number(usage.inputTokens);
+  const output = Number(usage.outputTokens);
+  const cacheRead = Number(usage.cacheReadTokens ?? 0);
   for (const [name, v] of [
-    ['inputTokens', input],
-    ['outputTokens', output],
-    ['cacheReadTokens', cacheRead],
+    ["inputTokens", input],
+    ["outputTokens", output],
+    ["cacheReadTokens", cacheRead],
   ]) {
-    if (!Number.isFinite(v) || v < 0) fail(`usage.${name} is invalid`)
+    if (!Number.isFinite(v) || v < 0) fail(`usage.${name} is invalid`);
   }
-  const calls = Number(modelCalls)
-  if (!Number.isFinite(calls) || calls < 0) fail('modelCalls is invalid')
+  const calls = Number(modelCalls);
+  if (!Number.isFinite(calls) || calls < 0) fail("modelCalls is invalid");
   return {
     input,
     output,
@@ -649,42 +647,44 @@ export function roundFromCursorUsage(usage, modelCalls = 1) {
     modelCalls: calls,
     context: input,
     estimated: false,
-  }
+  };
 }
 
 function tryRoundFromObject(obj) {
-  if (!obj || typeof obj !== 'object') return null
+  if (!obj || typeof obj !== "object") return null;
   if (
     obj.usage &&
-    typeof obj.usage === 'object' &&
-    'inputTokens' in obj.usage
+    typeof obj.usage === "object" &&
+    "inputTokens" in obj.usage
   ) {
-    return roundFromCursorUsage(obj.usage, obj.modelCalls ?? 1)
+    return roundFromCursorUsage(obj.usage, obj.modelCalls ?? 1);
   }
-  if ('inputTokens' in obj && 'outputTokens' in obj) {
-    return roundFromCursorUsage(obj, obj.modelCalls ?? 1)
+  if ("inputTokens" in obj && "outputTokens" in obj) {
+    return roundFromCursorUsage(obj, obj.modelCalls ?? 1);
   }
-  return null
+  return null;
 }
 
 function isClaudeAssistantEvent(row) {
   return (
-    row?.type === 'assistant' &&
+    row?.type === "assistant" &&
     row.message &&
-    typeof row.message === 'object' &&
+    typeof row.message === "object" &&
     row.message.usage &&
-    typeof row.message.usage === 'object'
-  )
+    typeof row.message.usage === "object"
+  );
 }
 
 /** Human prompt in a Claude session transcript (not a tool_result echo). */
 function isClaudePromptEvent(row) {
-  if (row?.type !== 'user' || row.isMeta) return false
-  const c = row.message?.content
-  if (typeof c === 'string') return true
+  if (row?.type !== "user" || row.isMeta) return false;
+  const c = row.message?.content;
+  if (typeof c === "string") return true;
   return (
-    Array.isArray(c) && c.length > 0 && !c.some((p) => p?.type === 'tool_result')
-  )
+    Array.isArray(c) &&
+    c.length > 0 &&
+    !c.some((p) => p?.type === "tool_result")
+  );
 }
 
 /**
@@ -697,49 +697,52 @@ function isClaudePromptEvent(row) {
  */
 export function roundsFromClaudeEvents(rows) {
   /** @type {{ calls: Map<string, object> }[]} */
-  const segments = []
-  let cur = null
+  const segments = [];
+  let cur = null;
   for (const row of rows) {
-    if ((row?.type === 'system' && row.subtype === 'init') || isClaudePromptEvent(row)) {
-      cur = { calls: new Map() }
-      segments.push(cur)
-      continue
+    if (
+      (row?.type === "system" && row.subtype === "init") ||
+      isClaudePromptEvent(row)
+    ) {
+      cur = { calls: new Map() };
+      segments.push(cur);
+      continue;
     }
-    if (!isClaudeAssistantEvent(row)) continue
+    if (!isClaudeAssistantEvent(row)) continue;
     if (!cur) {
-      cur = { calls: new Map() }
-      segments.push(cur)
+      cur = { calls: new Map() };
+      segments.push(cur);
     }
-    const id = row.message.id ?? `call-${cur.calls.size}`
-    cur.calls.set(id, row.message.usage)
+    const id = row.message.id ?? `call-${cur.calls.size}`;
+    cur.calls.set(id, row.message.usage);
   }
-  const rounds = []
+  const rounds = [];
   for (const seg of segments) {
-    if (seg.calls.size === 0) continue
-    let input = 0
-    let output = 0
-    let cacheRead = 0
-    let context = 0
-    let first = true
+    if (seg.calls.size === 0) continue;
+    let input = 0;
+    let output = 0;
+    let cacheRead = 0;
+    let context = 0;
+    let first = true;
     for (const u of seg.calls.values()) {
-      const inp = Number(u.input_tokens ?? 0)
-      const out = Number(u.output_tokens ?? 0)
-      const cr = Number(u.cache_read_input_tokens ?? 0)
-      const cc = Number(u.cache_creation_input_tokens ?? 0)
+      const inp = Number(u.input_tokens ?? 0);
+      const out = Number(u.output_tokens ?? 0);
+      const cr = Number(u.cache_read_input_tokens ?? 0);
+      const cc = Number(u.cache_creation_input_tokens ?? 0);
       for (const [name, v] of [
-        ['input_tokens', inp],
-        ['output_tokens', out],
-        ['cache_read_input_tokens', cr],
-        ['cache_creation_input_tokens', cc],
+        ["input_tokens", inp],
+        ["output_tokens", out],
+        ["cache_read_input_tokens", cr],
+        ["cache_creation_input_tokens", cc],
       ]) {
-        if (!Number.isFinite(v) || v < 0) fail(`usage.${name} is invalid`)
+        if (!Number.isFinite(v) || v < 0) fail(`usage.${name} is invalid`);
       }
-      const ctx = inp + cr + cc
-      if (first) input = ctx
-      first = false
-      output += out
-      cacheRead += cr
-      if (ctx > context) context = ctx
+      const ctx = inp + cr + cc;
+      if (first) input = ctx;
+      first = false;
+      output += out;
+      cacheRead += cr;
+      if (ctx > context) context = ctx;
     }
     rounds.push({
       input,
@@ -748,32 +751,32 @@ export function roundsFromClaudeEvents(rows) {
       modelCalls: seg.calls.size,
       context,
       estimated: false,
-    })
+    });
   }
-  return rounds
+  return rounds;
 }
 
 export function normalizeRounds(rows) {
   if (!Array.isArray(rows) || rows.length === 0)
-    fail('stats rounds must be a non-empty array')
+    fail("stats rounds must be a non-empty array");
   return rows.map((r, i) => {
-    if (!r || typeof r !== 'object') fail(`stats round ${i} is not an object`)
-    const fromUsage = tryRoundFromObject(r)
-    if (fromUsage) return fromUsage
-    const input = Number(r.input)
-    const output = Number(r.output)
-    const cacheRead = Number(r.cacheRead ?? r.cache_read ?? 0)
-    const modelCalls = Number(r.modelCalls ?? r.model_calls ?? 1)
-    const context = Number(r.context)
+    if (!r || typeof r !== "object") fail(`stats round ${i} is not an object`);
+    const fromUsage = tryRoundFromObject(r);
+    if (fromUsage) return fromUsage;
+    const input = Number(r.input);
+    const output = Number(r.output);
+    const cacheRead = Number(r.cacheRead ?? r.cache_read ?? 0);
+    const modelCalls = Number(r.modelCalls ?? r.model_calls ?? 1);
+    const context = Number(r.context);
     for (const [name, v] of [
-      ['input', input],
-      ['output', output],
-      ['cacheRead', cacheRead],
-      ['modelCalls', modelCalls],
-      ['context', context],
+      ["input", input],
+      ["output", output],
+      ["cacheRead", cacheRead],
+      ["modelCalls", modelCalls],
+      ["context", context],
     ]) {
       if (!Number.isFinite(v) || v < 0)
-        fail(`stats round ${i} has invalid ${name}`)
+        fail(`stats round ${i} has invalid ${name}`);
     }
     return {
       input,
@@ -782,8 +785,8 @@ export function normalizeRounds(rows) {
       modelCalls,
       context,
       estimated: Boolean(r.estimated),
-    }
-  })
+    };
+  });
 }
 
 /**
@@ -794,51 +797,51 @@ export function normalizeRounds(rows) {
  */
 export function roundsFromStoreMessages(messages) {
   if (!Array.isArray(messages) || messages.length === 0)
-    fail('store.db has no JSON role messages')
-  const startIdxs = []
+    fail("store.db has no JSON role messages");
+  const startIdxs = [];
   for (let i = 0; i < messages.length; i++) {
-    if (isRoundStartingUser(messages[i])) startIdxs.push(i)
+    if (isRoundStartingUser(messages[i])) startIdxs.push(i);
   }
   if (startIdxs.length === 0)
-    fail('store.db has no round-starting user messages after preamble')
+    fail("store.db has no round-starting user messages after preamble");
 
   /** @type {object[][]} */
-  const segments = []
+  const segments = [];
   for (let s = 0; s < startIdxs.length; s++) {
-    const from = startIdxs[s]
-    const to = s + 1 < startIdxs.length ? startIdxs[s + 1] : messages.length
-    segments.push(messages.slice(from, to))
+    const from = startIdxs[s];
+    const to = s + 1 < startIdxs.length ? startIdxs[s + 1] : messages.length;
+    segments.push(messages.slice(from, to));
   }
 
-  let priorChars = 0
+  let priorChars = 0;
   for (let i = 0; i < startIdxs[0]; i++) {
-    priorChars += messageContentChars(messages[i])
+    priorChars += messageContentChars(messages[i]);
   }
 
   return segments.map((seg) => {
-    let cum = priorChars
-    let peakContext = 0
-    let outputChars = 0
-    let modelCalls = 0
-    let sawAssistant = false
+    let cum = priorChars;
+    let peakContext = 0;
+    let outputChars = 0;
+    let modelCalls = 0;
+    let sawAssistant = false;
     for (const m of seg) {
-      if (m?.role === 'assistant') {
-        modelCalls += 1
-        const ctx = estimateTokensFromChars(cum)
-        if (!sawAssistant || ctx > peakContext) peakContext = ctx
-        sawAssistant = true
-        outputChars += messageContentChars(m)
+      if (m?.role === "assistant") {
+        modelCalls += 1;
+        const ctx = estimateTokensFromChars(cum);
+        if (!sawAssistant || ctx > peakContext) peakContext = ctx;
+        sawAssistant = true;
+        outputChars += messageContentChars(m);
       }
-      cum += messageContentChars(m)
+      cum += messageContentChars(m);
     }
-    if (!sawAssistant) peakContext = estimateTokensFromChars(cum)
+    if (!sawAssistant) peakContext = estimateTokensFromChars(cum);
     const input = estimateTokensFromChars(
       priorChars +
         seg
-          .filter((m) => m?.role === 'user' && !isSystemNotificationUser(m))
+          .filter((m) => m?.role === "user" && !isSystemNotificationUser(m))
           .reduce((n, m) => n + messageContentChars(m), 0),
-    )
-    priorChars = cum
+    );
+    priorChars = cum;
     return {
       input,
       output: estimateTokensFromChars(outputChars),
@@ -846,165 +849,165 @@ export function roundsFromStoreMessages(messages) {
       modelCalls,
       context: peakContext,
       estimated: true,
-    }
-  })
+    };
+  });
 }
 
 function parseMetaJson(value) {
-  if (value == null) return null
+  if (value == null) return null;
   if (Buffer.isBuffer(value) || value instanceof Uint8Array) {
-    const buf = Buffer.isBuffer(value) ? value : Buffer.from(value)
+    const buf = Buffer.isBuffer(value) ? value : Buffer.from(value);
     try {
-      return JSON.parse(buf.toString('utf8'))
+      return JSON.parse(buf.toString("utf8"));
     } catch {
       /* hex below */
     }
-    const s = buf.toString('utf8')
+    const s = buf.toString("utf8");
     if (/^[0-9a-fA-F]+$/.test(s) && s.length % 2 === 0) {
       try {
-        return JSON.parse(Buffer.from(s, 'hex').toString('utf8'))
+        return JSON.parse(Buffer.from(s, "hex").toString("utf8"));
       } catch {
-        return null
+        return null;
       }
     }
-    return null
+    return null;
   }
-  const s = String(value)
+  const s = String(value);
   try {
-    return JSON.parse(s)
+    return JSON.parse(s);
   } catch {
     /* try hex-encoded JSON (Cursor store.db meta) */
   }
   if (/^[0-9a-fA-F]+$/.test(s) && s.length % 2 === 0) {
     try {
-      const raw = Buffer.from(s, 'hex').toString('utf8')
-      return JSON.parse(raw)
+      const raw = Buffer.from(s, "hex").toString("utf8");
+      return JSON.parse(raw);
     } catch {
-      return null
+      return null;
     }
   }
-  return null
+  return null;
 }
 
 export function loadRoundsFromStoreDb(db) {
-  const rows = db.prepare('SELECT key, value FROM meta').all()
-  if (!rows.length) fail('store.db meta is empty')
-  let meta = null
+  const rows = db.prepare("SELECT key, value FROM meta").all();
+  if (!rows.length) fail("store.db meta is empty");
+  let meta = null;
   for (const row of rows) {
-    const j = parseMetaJson(row.value)
-    if (j?.agentStats?.rounds) return normalizeRounds(j.agentStats.rounds)
-    if (j?.rounds) return normalizeRounds(j.rounds)
-    if (j?.latestRootBlobId) meta = j
+    const j = parseMetaJson(row.value);
+    if (j?.agentStats?.rounds) return normalizeRounds(j.agentStats.rounds);
+    if (j?.rounds) return normalizeRounds(j.rounds);
+    if (j?.latestRootBlobId) meta = j;
   }
   if (!meta?.latestRootBlobId)
-    fail('store.db meta has no latestRootBlobId (and no agentStats.rounds)')
+    fail("store.db meta has no latestRootBlobId (and no agentStats.rounds)");
   const rootRow = db
-    .prepare('SELECT data FROM blobs WHERE id = ?')
-    .get(meta.latestRootBlobId)
-  if (!rootRow?.data) fail('store.db missing root blob for latestRootBlobId')
-  const ids = blobIdsFromRootProtobuf(rootRow.data)
-  if (!ids.length) fail('store.db root blob has no field-1 blob ids')
-  const messages = []
+    .prepare("SELECT data FROM blobs WHERE id = ?")
+    .get(meta.latestRootBlobId);
+  if (!rootRow?.data) fail("store.db missing root blob for latestRootBlobId");
+  const ids = blobIdsFromRootProtobuf(rootRow.data);
+  if (!ids.length) fail("store.db root blob has no field-1 blob ids");
+  const messages = [];
   for (const id of ids) {
-    const row = db.prepare('SELECT data FROM blobs WHERE id = ?').get(id)
-    if (!row?.data) fail(`store.db missing blob ${id}`)
-    const raw = row.data
-    const buf = Buffer.isBuffer(raw) ? raw : Buffer.from(raw)
-    if (buf.length === 0 || (buf[0] !== 0x7b && buf[0] !== 0x5b)) continue
+    const row = db.prepare("SELECT data FROM blobs WHERE id = ?").get(id);
+    if (!row?.data) fail(`store.db missing blob ${id}`);
+    const raw = row.data;
+    const buf = Buffer.isBuffer(raw) ? raw : Buffer.from(raw);
+    if (buf.length === 0 || (buf[0] !== 0x7b && buf[0] !== 0x5b)) continue;
     try {
-      const msg = JSON.parse(buf.toString('utf8'))
-      if (msg && typeof msg === 'object' && typeof msg.role === 'string') {
-        messages.push(msg)
+      const msg = JSON.parse(buf.toString("utf8"));
+      if (msg && typeof msg === "object" && typeof msg.role === "string") {
+        messages.push(msg);
       }
     } catch {
-      fail(`store.db blob ${id} is not valid JSON`)
+      fail(`store.db blob ${id} is not valid JSON`);
     }
   }
-  return roundsFromStoreMessages(messages)
+  return roundsFromStoreMessages(messages);
 }
 
 export function parseStatsRoundsJson(text) {
-  const trimmed = String(text ?? '').trim()
-  if (!trimmed) fail('stats document is empty')
+  const trimmed = String(text ?? "").trim();
+  if (!trimmed) fail("stats document is empty");
   const lines = trimmed
-    .split('\n')
+    .split("\n")
     .map((l) => l.trim())
-    .filter(Boolean)
+    .filter(Boolean);
   // Multi-line JSONL before whole-file JSON.parse.
-  if (lines.length > 1 && lines.every((l) => l.startsWith('{'))) {
-    const rows = []
+  if (lines.length > 1 && lines.every((l) => l.startsWith("{"))) {
+    const rows = [];
     for (const t of lines) {
       try {
-        rows.push(JSON.parse(t))
+        rows.push(JSON.parse(t));
       } catch {
-        fail('stats JSONL line is invalid JSON')
+        fail("stats JSONL line is invalid JSON");
       }
     }
-    if (rows.some(isClaudeAssistantEvent)) return roundsFromClaudeEvents(rows)
-    return normalizeRounds(rows.map((row) => tryRoundFromObject(row) ?? row))
+    if (rows.some(isClaudeAssistantEvent)) return roundsFromClaudeEvents(rows);
+    return normalizeRounds(rows.map((row) => tryRoundFromObject(row) ?? row));
   }
-  if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
-    let j
+  if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+    let j;
     try {
-      j = JSON.parse(trimmed)
+      j = JSON.parse(trimmed);
     } catch {
-      fail('stats JSON is invalid')
+      fail("stats JSON is invalid");
     }
-    const one = tryRoundFromObject(j)
-    if (one) return [one]
+    const one = tryRoundFromObject(j);
+    if (one) return [one];
     if (Array.isArray(j)) {
       if (j.length && j.every((x) => tryRoundFromObject(x))) {
-        return j.map((x) => tryRoundFromObject(x))
+        return j.map((x) => tryRoundFromObject(x));
       }
-      return normalizeRounds(j)
+      return normalizeRounds(j);
     }
-    if (j && Array.isArray(j.rounds)) return normalizeRounds(j.rounds)
-    if (j?.agentStats?.rounds) return normalizeRounds(j.agentStats.rounds)
+    if (j && Array.isArray(j.rounds)) return normalizeRounds(j.rounds);
+    if (j?.agentStats?.rounds) return normalizeRounds(j.agentStats.rounds);
     fail(
-      'stats JSON must be cursor-agent result (usage.*Tokens), {rounds:[…]}, or an array of rounds (Claude: pass the stream-json log)',
-    )
+      "stats JSON must be cursor-agent result (usage.*Tokens), {rounds:[…]}, or an array of rounds (Claude: pass the stream-json log)",
+    );
   }
   // Multi-line `{...}` JSONL is handled above. Anything else that does not
   // start with `{`/`[` is not a supported stats document (avoid treating a
   // prompt that merely mentions tags as a format).
   for (const t of lines) {
     try {
-      JSON.parse(t)
+      JSON.parse(t);
     } catch {
-      fail('stats JSONL line is invalid JSON')
+      fail("stats JSONL line is invalid JSON");
     }
   }
   fail(
-    'stats document must be JSON ({rounds}/usage) or multi-line `{`-prefixed JSONL',
-  )
+    "stats document must be JSON ({rounds}/usage) or multi-line `{`-prefixed JSONL",
+  );
 }
 
 export function loadStatsRounds(filePath) {
-  if (!fs.existsSync(filePath)) fail(`stats path not found: ${filePath}`)
-  const lower = filePath.toLowerCase()
-  if (lower.endsWith('.db') || lower.endsWith('.sqlite')) {
-    let DatabaseSync
+  if (!fs.existsSync(filePath)) fail(`stats path not found: ${filePath}`);
+  const lower = filePath.toLowerCase();
+  if (lower.endsWith(".db") || lower.endsWith(".sqlite")) {
+    let DatabaseSync;
     try {
-      ;({ DatabaseSync } = nodeRequire('node:sqlite'))
+      ({ DatabaseSync } = nodeRequire("node:sqlite"));
     } catch (e) {
-      fail(`node:sqlite unavailable: ${e.message}`)
+      fail(`node:sqlite unavailable: ${e.message}`);
     }
-    const db = new DatabaseSync(filePath, { readOnly: true })
+    const db = new DatabaseSync(filePath, { readOnly: true });
     try {
-      return loadRoundsFromStoreDb(db)
+      return loadRoundsFromStoreDb(db);
     } finally {
-      db.close()
+      db.close();
     }
   }
-  return parseStatsRoundsJson(fs.readFileSync(filePath, 'utf8'))
+  return parseStatsRoundsJson(fs.readFileSync(filePath, "utf8"));
 }
 
 export function summarizeStats(rounds) {
-  const peakContext = Math.max(...rounds.map((r) => r.context))
-  const firstInput = rounds[0].input
-  const modelCalls = rounds.reduce((n, r) => n + r.modelCalls, 0)
-  const estimated = rounds.some((r) => r.estimated)
-  return { rounds, peakContext, firstInput, modelCalls, estimated }
+  const peakContext = Math.max(...rounds.map((r) => r.context));
+  const firstInput = rounds[0].input;
+  const modelCalls = rounds.reduce((n, r) => n + r.modelCalls, 0);
+  const estimated = rounds.some((r) => r.estimated);
+  return { rounds, peakContext, firstInput, modelCalls, estimated };
 }
 
 export function statsExitCode(summary) {
@@ -1012,73 +1015,73 @@ export function statsExitCode(summary) {
     summary.peakContext > STATS_PEAK_CONTEXT_MAX ||
     summary.firstInput > STATS_FIRST_ROUND_INPUT_MAX
   ) {
-    return 1
+    return 1;
   }
-  return 0
+  return 0;
 }
 
 export function parseTouchSetPaths(designText) {
-  const paths = []
-  for (const line of designText.split('\n')) {
-    const m = /^\|\s*`([^`]+)`\s*\|/.exec(line)
-    if (m && !m[1].includes('…') && m[1] !== 'File') paths.push(m[1])
+  const paths = [];
+  for (const line of designText.split("\n")) {
+    const m = /^\|\s*`([^`]+)`\s*\|/.exec(line);
+    if (m && !m[1].includes("…") && m[1] !== "File") paths.push(m[1]);
   }
-  return paths
+  return paths;
 }
 
 export function slugFromBranch(name) {
-  const m = /^(?:feat|fix)\/(.+)$/.exec(name)
-  return m ? m[1] : name
+  const m = /^(?:feat|fix)\/(.+)$/.exec(name);
+  return m ? m[1] : name;
 }
 
-const PUSH_FAIL_FILE = 'agent-finish-push-failures.json'
-const RUN_STARTED_FILE = 'agent-run-started.json'
-const PR_BODY_METRICS_FILE = 'agent-pr-body-with-metrics.md'
-const PR_BODY_PREFILL_FILE = 'agent-pr-body-prefill.md'
+const PUSH_FAIL_FILE = "agent-finish-push-failures.json";
+const RUN_STARTED_FILE = "agent-run-started.json";
+const PR_BODY_METRICS_FILE = "agent-pr-body-with-metrics.md";
+const PR_BODY_PREFILL_FILE = "agent-pr-body-prefill.md";
 
 /** Resolve a path inside the git dir (works when `.git` is a file / linked worktree). */
 export function gitPath(root, relPath, exec = defaultExec) {
-  const r = exec('git', ['rev-parse', '--git-path', relPath], {
+  const r = exec("git", ["rev-parse", "--git-path", relPath], {
     cwd: root,
     env: process.env,
-  })
+  });
   if (r.code === 0) {
-    const out = r.stdout.trim()
-    return path.isAbsolute(out) ? out : path.resolve(root, out)
+    const out = r.stdout.trim();
+    return path.isAbsolute(out) ? out : path.resolve(root, out);
   }
-  const fallbackDir = path.join(root, '.git')
+  const fallbackDir = path.join(root, ".git");
   if (fs.existsSync(fallbackDir) && fs.statSync(fallbackDir).isDirectory())
-    return path.join(fallbackDir, relPath)
+    return path.join(fallbackDir, relPath);
   fail(
     `git rev-parse --git-path ${relPath} failed under ${root}:\n${tailOutput(r.stdout, r.stderr)}`,
-  )
+  );
 }
 
 export function pushFailPath(root, exec = defaultExec) {
-  return gitPath(root, PUSH_FAIL_FILE, exec)
+  return gitPath(root, PUSH_FAIL_FILE, exec);
 }
 
 export function readPushFailures(root, exec = defaultExec) {
-  const p = pushFailPath(root, exec)
-  if (!fs.existsSync(p)) return {}
+  const p = pushFailPath(root, exec);
+  if (!fs.existsSync(p)) return {};
   try {
-    return JSON.parse(fs.readFileSync(p, 'utf8'))
+    return JSON.parse(fs.readFileSync(p, "utf8"));
   } catch {
-    return {}
+    return {};
   }
 }
 
 export function writePushFailures(root, map, exec = defaultExec) {
-  const p = pushFailPath(root, exec)
-  fs.mkdirSync(path.dirname(p), { recursive: true })
-  fs.writeFileSync(p, JSON.stringify(map, null, 0) + '\n')
+  const p = pushFailPath(root, exec);
+  fs.mkdirSync(path.dirname(p), { recursive: true });
+  fs.writeFileSync(p, JSON.stringify(map, null, 0) + "\n");
 }
 
 export function resolveGitRelPath(root, relPath, exec = defaultExec) {
   try {
-    return gitPath(root, relPath, exec)
+    return gitPath(root, relPath, exec);
   } catch {
-    return path.join(root, '.git', relPath)
+    return path.join(root, ".git", relPath);
   }
 }
 
@@ -1086,36 +1089,36 @@ export function resolveGitRelPath(root, relPath, exec = defaultExec) {
  * @returns {{ startedAtMs: number, branch: string } | null}
  */
 export function readRunStarted(root, exec = defaultExec) {
-  const p = resolveGitRelPath(root, RUN_STARTED_FILE, exec)
-  if (!fs.existsSync(p)) return null
+  const p = resolveGitRelPath(root, RUN_STARTED_FILE, exec);
+  if (!fs.existsSync(p)) return null;
   try {
-    const j = JSON.parse(fs.readFileSync(p, 'utf8'))
-    if (typeof j.startedAtMs !== 'number' || !Number.isFinite(j.startedAtMs))
-      return null
-    const branch = typeof j.branch === 'string' ? j.branch : ''
-    return { startedAtMs: j.startedAtMs, branch }
+    const j = JSON.parse(fs.readFileSync(p, "utf8"));
+    if (typeof j.startedAtMs !== "number" || !Number.isFinite(j.startedAtMs))
+      return null;
+    const branch = typeof j.branch === "string" ? j.branch : "";
+    return { startedAtMs: j.startedAtMs, branch };
   } catch {
-    return null
+    return null;
   }
 }
 
 export function readRunStartedMs(root, exec = defaultExec) {
-  return readRunStarted(root, exec)?.startedAtMs ?? null
+  return readRunStarted(root, exec)?.startedAtMs ?? null;
 }
 
 export function writeRunStarted(
   root,
   startedAtMs = Date.now(),
   exec = defaultExec,
-  branch = '',
+  branch = "",
 ) {
-  const p = resolveGitRelPath(root, RUN_STARTED_FILE, exec)
-  fs.mkdirSync(path.dirname(p), { recursive: true })
+  const p = resolveGitRelPath(root, RUN_STARTED_FILE, exec);
+  fs.mkdirSync(path.dirname(p), { recursive: true });
   fs.writeFileSync(
     p,
-    JSON.stringify({ startedAtMs, branch: String(branch ?? '') }) + '\n',
-  )
-  return p
+    JSON.stringify({ startedAtMs, branch: String(branch ?? "") }) + "\n",
+  );
+  return p;
 }
 
 /**
@@ -1128,23 +1131,23 @@ export function ensureRunStarted(
   startedAtMs = Date.now(),
   exec = defaultExec,
 ) {
-  const existing = readRunStarted(root, exec)
+  const existing = readRunStarted(root, exec);
   if (existing && existing.branch === branch) {
     return {
       startedAtMs: existing.startedAtMs,
       branch: existing.branch,
       path: resolveGitRelPath(root, RUN_STARTED_FILE, exec),
       wrote: false,
-    }
+    };
   }
-  const pathWritten = writeRunStarted(root, startedAtMs, exec, branch)
-  return { startedAtMs, branch, path: pathWritten, wrote: true }
+  const pathWritten = writeRunStarted(root, startedAtMs, exec, branch);
+  return { startedAtMs, branch, path: pathWritten, wrote: true };
 }
 
 export function clearRunStarted(root, exec = defaultExec) {
-  const p = resolveGitRelPath(root, RUN_STARTED_FILE, exec)
-  if (fs.existsSync(p)) fs.unlinkSync(p)
-  return p
+  const p = resolveGitRelPath(root, RUN_STARTED_FILE, exec);
+  if (fs.existsSync(p)) fs.unlinkSync(p);
+  return p;
 }
 
 /**
@@ -1155,12 +1158,12 @@ export function resolveRunStartedMs(
   env = process.env,
   exec = defaultExec,
 ) {
-  const raw = env.AGENT_RUN_STARTED_AT
-  if (raw != null && String(raw).trim() !== '') {
-    const sec = Number(String(raw).trim())
-    if (Number.isFinite(sec)) return Math.round(sec * 1000)
+  const raw = env.AGENT_RUN_STARTED_AT;
+  if (raw != null && String(raw).trim() !== "") {
+    const sec = Number(String(raw).trim());
+    if (Number.isFinite(sec)) return Math.round(sec * 1000);
   }
-  return readRunStartedMs(root, exec)
+  return readRunStartedMs(root, exec);
 }
 
 /**
@@ -1174,64 +1177,64 @@ export function buildPrBodyWithMetrics(
   exec = defaultExec,
   nowMs = Date.now(),
 ) {
-  const raw = fs.readFileSync(bodyPath, 'utf8')
-  const startedAtMs = resolveRunStartedMs(root, env, exec)
+  const raw = fs.readFileSync(bodyPath, "utf8");
+  const startedAtMs = resolveRunStartedMs(root, env, exec);
   const wallTimeSec =
     startedAtMs == null
       ? null
-      : Math.max(0, Math.round((nowMs - startedAtMs) / 1000))
-  const tokensRaw = env.AGENT_TOKEN_USAGE
+      : Math.max(0, Math.round((nowMs - startedAtMs) / 1000));
+  const tokensRaw = env.AGENT_TOKEN_USAGE;
   const tokens =
-    tokensRaw != null && String(tokensRaw).trim() !== ''
+    tokensRaw != null && String(tokensRaw).trim() !== ""
       ? String(tokensRaw).trim()
-      : null
-  const metricLines = ['## Metrics', '']
+      : null;
+  const metricLines = ["## Metrics", ""];
   metricLines.push(
     wallTimeSec == null
-      ? '- wall_time_sec: unknown'
+      ? "- wall_time_sec: unknown"
       : `- wall_time_sec: ${wallTimeSec}`,
-  )
-  if (tokens != null) metricLines.push(`- tokens: ${tokens}`)
-  metricLines.push('')
-  const block = `${metricLines.join('\n')}\n`
-  let body
+  );
+  if (tokens != null) metricLines.push(`- tokens: ${tokens}`);
+  metricLines.push("");
+  const block = `${metricLines.join("\n")}\n`;
+  let body;
   if (/^## Metrics\b/m.test(raw)) {
-    body = raw.replace(/^## Metrics\b[\s\S]*?(?=^## )/m, block)
+    body = raw.replace(/^## Metrics\b[\s\S]*?(?=^## )/m, block);
     if (body === raw) {
-      body = raw.replace(/^## Metrics\b[\s\S]*$/m, `${block.trimEnd()}\n`)
+      body = raw.replace(/^## Metrics\b[\s\S]*$/m, `${block.trimEnd()}\n`);
     }
   } else {
-    body = `${raw.trimEnd()}\n\n${block}`
+    body = `${raw.trimEnd()}\n\n${block}`;
   }
-  const out = resolveGitRelPath(root, PR_BODY_METRICS_FILE, exec)
-  fs.mkdirSync(path.dirname(out), { recursive: true })
-  fs.writeFileSync(out, body)
-  return { bodyPath: out, wallTimeSec, tokens }
+  const out = resolveGitRelPath(root, PR_BODY_METRICS_FILE, exec);
+  fs.mkdirSync(path.dirname(out), { recursive: true });
+  fs.writeFileSync(out, body);
+  return { bodyPath: out, wallTimeSec, tokens };
 }
 
 /** Body of a `## <heading>` section (up to the next `## `), trimmed. */
 function sectionBody(text, heading) {
   const re = new RegExp(
     `^## ${heading}\\b[^\\n]*\\n([\\s\\S]*?)(?=^## |(?![\\s\\S]))`,
-    'm',
-  )
-  const m = re.exec(text)
-  return m ? m[1].trim() : ''
+    "m",
+  );
+  const m = re.exec(text);
+  return m ? m[1].trim() : "";
 }
 
 /** Replace the body of `## <heading>` in `text`, keeping the heading line. */
 function replaceSection(text, heading, content) {
   const re = new RegExp(
     `(^## ${heading}\\b[^\\n]*\\n)[\\s\\S]*?(?=^## |(?![\\s\\S]))`,
-    'm',
-  )
-  return text.replace(re, (_, h) => `${h}\n${content}\n\n`)
+    "m",
+  );
+  return text.replace(re, (_, h) => `${h}\n${content}\n\n`);
 }
 
 /** Archived (preferred) or active OpenSpec change dir for `slug`, or null. */
 export function findOpenspecChange(root, slug) {
-  const changes = path.join(root, 'openspec', 'changes')
-  const archive = path.join(changes, 'archive')
+  const changes = path.join(root, "openspec", "changes");
+  const archive = path.join(changes, "archive");
   if (fs.existsSync(archive)) {
     const hit = fs
       .readdirSync(archive, { withFileTypes: true })
@@ -1241,16 +1244,16 @@ export function findOpenspecChange(root, slug) {
       )
       .map((e) => e.name)
       .sort()
-      .pop()
-    if (hit) return { dir: path.join(archive, hit), archived: true }
+      .pop();
+    if (hit) return { dir: path.join(archive, hit), archived: true };
   }
-  const active = path.join(changes, slug)
-  if (fs.existsSync(active)) return { dir: active, archived: false }
-  return null
+  const active = path.join(changes, slug);
+  if (fs.existsSync(active)) return { dir: active, archived: false };
+  return null;
 }
 
 const FALLBACK_PR_TEMPLATE =
-  '## Summary\n\n-\n\n## OpenSpec\n\n## Manual test scenarios\n\n1.\n\n## Metrics\n'
+  "## Summary\n\n-\n\n## OpenSpec\n\n## Manual test scenarios\n\n1.\n\n## Metrics\n";
 
 /**
  * Prefill `.github/PULL_REQUEST_TEMPLATE.md`: Summary from commit subjects,
@@ -1258,79 +1261,79 @@ const FALLBACK_PR_TEMPLATE =
  * Metrics is filled afterwards by buildPrBodyWithMetrics.
  */
 export function buildPrefilledBody(root, branch, exec = defaultExec) {
-  const tplPath = path.join(root, '.github', 'PULL_REQUEST_TEMPLATE.md')
+  const tplPath = path.join(root, ".github", "PULL_REQUEST_TEMPLATE.md");
   let body = fs.existsSync(tplPath)
-    ? fs.readFileSync(tplPath, 'utf8')
-    : FALLBACK_PR_TEMPLATE
-  body = body.replace(/<!--[\s\S]*?-->\n?/g, '')
+    ? fs.readFileSync(tplPath, "utf8")
+    : FALLBACK_PR_TEMPLATE;
+  body = body.replace(/<!--[\s\S]*?-->\n?/g, "");
 
-  const slug = slugFromBranch(branch)
+  const slug = slugFromBranch(branch);
   const log = exec(
-    'git',
-    ['log', '--reverse', '--format=%s', 'origin/main..HEAD'],
+    "git",
+    ["log", "--reverse", "--format=%s", "origin/main..HEAD"],
     { cwd: root, env: process.env },
-  )
+  );
   const subjects =
     log.code === 0
       ? log.stdout
-          .split('\n')
+          .split("\n")
           .map((l) => l.trim())
           .filter(Boolean)
-      : []
+      : [];
   body = replaceSection(
     body,
-    'Summary',
-    (subjects.length ? subjects : [slug]).map((l) => `- ${l}`).join('\n'),
-  )
+    "Summary",
+    (subjects.length ? subjects : [slug]).map((l) => `- ${l}`).join("\n"),
+  );
 
-  const change = findOpenspecChange(root, slug)
+  const change = findOpenspecChange(root, slug);
   body = replaceSection(
     body,
-    'OpenSpec',
+    "OpenSpec",
     change
       ? [
           `- Change: \`${slug}\``,
-          `- Archived: ${change.archived ? 'yes' : 'no'}`,
-          '- Docs/rules updated: yes',
-        ].join('\n')
-      : '- Change: `N/A`\n- Archived: N/A\n- Docs/rules updated: N/A',
-  )
+          `- Archived: ${change.archived ? "yes" : "no"}`,
+          "- Docs/rules updated: yes",
+        ].join("\n")
+      : "- Change: `N/A`\n- Archived: N/A\n- Docs/rules updated: N/A",
+  );
 
-  const tasks = change ? path.join(change.dir, 'tasks.md') : ''
+  const tasks = change ? path.join(change.dir, "tasks.md") : "";
   const scenarios =
     tasks && fs.existsSync(tasks)
-      ? sectionBody(fs.readFileSync(tasks, 'utf8'), 'Manual test scenarios')
-      : ''
-  body = replaceSection(body, 'Manual test scenarios', scenarios || '1. N/A')
-  return `${body.replace(/\n{3,}/g, '\n\n').trimEnd()}\n`
+      ? sectionBody(fs.readFileSync(tasks, "utf8"), "Manual test scenarios")
+      : "";
+  body = replaceSection(body, "Manual test scenarios", scenarios || "1. N/A");
+  return `${body.replace(/\n{3,}/g, "\n\n").trimEnd()}\n`;
 }
 
 /** Path of another worktree that has `branch` checked out, or null. */
 export function branchHeldInOtherWorktree(exec, cwd, env, quiet, branch) {
-  const wt = sh(exec, cwd, env, quiet, 'git', [
-    'worktree',
-    'list',
-    '--porcelain',
-  ])
+  const wt = sh(exec, cwd, env, quiet, "git", [
+    "worktree",
+    "list",
+    "--porcelain",
+  ]);
   if (wt.code !== 0)
     fail(
       `git worktree list failed:\n${tailOutput(wt.stdout, wt.stderr)}`,
       wt.code || 1,
-    )
-  const cwdAbs = path.resolve(cwd)
-  let blockPath = null
-  let held = null
-  for (const line of wt.stdout.split('\n')) {
-    if (line.startsWith('worktree ')) {
-      blockPath = line.slice('worktree '.length).trim()
-      continue
+    );
+  const cwdAbs = path.resolve(cwd);
+  let blockPath = null;
+  let held = null;
+  for (const line of wt.stdout.split("\n")) {
+    if (line.startsWith("worktree ")) {
+      blockPath = line.slice("worktree ".length).trim();
+      continue;
     }
-    const m = /^branch refs\/heads\/(.+)$/.exec(line.trim())
+    const m = /^branch refs\/heads\/(.+)$/.exec(line.trim());
     if (m && m[1] === branch && blockPath) {
-      if (path.resolve(blockPath) !== cwdAbs) held = blockPath
+      if (path.resolve(blockPath) !== cwdAbs) held = blockPath;
     }
   }
-  return held
+  return held;
 }
 
 /**
@@ -1338,46 +1341,46 @@ export function branchHeldInOtherWorktree(exec, cwd, env, quiet, branch) {
  * and is not checked out elsewhere. Never reset or delete.
  */
 function reuseExistingFeatureBranch(exec, cwd, env, quiet, branch, createFail) {
-  const cur = sh(exec, cwd, env, quiet, 'git', ['branch', '--show-current'])
-  if (cur.code === 0 && cur.stdout.trim() === branch) return
+  const cur = sh(exec, cwd, env, quiet, "git", ["branch", "--show-current"]);
+  if (cur.code === 0 && cur.stdout.trim() === branch) return;
 
-  const exists = sh(exec, cwd, env, quiet, 'git', [
-    'show-ref',
-    '--verify',
-    '--quiet',
+  const exists = sh(exec, cwd, env, quiet, "git", [
+    "show-ref",
+    "--verify",
+    "--quiet",
     `refs/heads/${branch}`,
-  ])
+  ]);
   if (exists.code !== 0) {
     fail(
       `cannot create branch ${branch} and it does not exist locally:\n${tailOutput(createFail.stdout, createFail.stderr)}`,
       createFail.code || 1,
-    )
+    );
   }
 
-  const mb = sh(exec, cwd, env, quiet, 'git', [
-    'merge-base',
+  const mb = sh(exec, cwd, env, quiet, "git", [
+    "merge-base",
     branch,
-    'origin/main',
-  ])
+    "origin/main",
+  ]);
   if (mb.code !== 0) {
     fail(
       `local branch ${branch} does not share history with origin/main; refusing to switch (never reset/delete):\n${tailOutput(mb.stdout, mb.stderr)}\n${tailOutput(createFail.stdout, createFail.stderr)}`,
       mb.code || 1,
-    )
+    );
   }
 
-  const held = branchHeldInOtherWorktree(exec, cwd, env, quiet, branch)
+  const held = branchHeldInOtherWorktree(exec, cwd, env, quiet, branch);
   if (held) {
     fail(
       `branch ${branch} is checked out in another worktree (${held}); refusing to switch`,
       1,
-    )
+    );
   }
 
   mustOk(
-    sh(exec, cwd, env, quiet, 'git', ['switch', branch]),
+    sh(exec, cwd, env, quiet, "git", ["switch", branch]),
     `git switch ${branch}`,
-  )
+  );
 }
 
 export function switchFeatureBranch(
@@ -1389,38 +1392,38 @@ export function switchFeatureBranch(
   fromOriginMain,
 ) {
   if (fromOriginMain) {
-    const create = sh(exec, cwd, env, quiet, 'git', [
-      'switch',
-      '-c',
+    const create = sh(exec, cwd, env, quiet, "git", [
+      "switch",
+      "-c",
       branch,
-      '--no-track',
-      'origin/main',
-    ])
-    if (create.code === 0) return
-    reuseExistingFeatureBranch(exec, cwd, env, quiet, branch, create)
-    return
+      "--no-track",
+      "origin/main",
+    ]);
+    if (create.code === 0) return;
+    reuseExistingFeatureBranch(exec, cwd, env, quiet, branch, create);
+    return;
   }
-  const sw = sh(exec, cwd, env, quiet, 'git', ['switch', '-c', branch])
-  if (sw.code === 0) return
-  reuseExistingFeatureBranch(exec, cwd, env, quiet, branch, sw)
+  const sw = sh(exec, cwd, env, quiet, "git", ["switch", "-c", branch]);
+  if (sw.code === 0) return;
+  reuseExistingFeatureBranch(exec, cwd, env, quiet, branch, sw);
 }
 
 /** Compact pre-push / pnpm check failure lines from push output. */
 export function summarizePushFailure(stdout, stderr) {
-  const combined = stripAnsi(`${stdout ?? ''}\n${stderr ?? ''}`)
+  const combined = stripAnsi(`${stdout ?? ""}\n${stderr ?? ""}`);
   const lines = combined
-    .split('\n')
+    .split("\n")
     .map((l) => l.trimEnd())
-    .filter((l) => l.trim().length > 0)
+    .filter((l) => l.trim().length > 0);
   const checkish = lines.filter(
     (l) =>
       /^OK [a-z0-9-]+ /.test(l) ||
       /^[a-z][a-z0-9-]*: /.test(l) ||
-      l.startsWith('\u2026') ||
-      l.startsWith('full log:'),
-  )
-  if (checkish.length) return checkish.slice(0, 60).join('\n')
-  return tailOutput(stdout, stderr)
+      l.startsWith("\u2026") ||
+      l.startsWith("full log:"),
+  );
+  if (checkish.length) return checkish.slice(0, 60).join("\n");
+  return tailOutput(stdout, stderr);
 }
 
 /**
@@ -1431,108 +1434,132 @@ export function summarizePushFailure(stdout, stderr) {
  */
 export function refreshStaleFeatureBranch(exec, root, cwd, env, quiet) {
   const behindR = mustOk(
-    sh(exec, cwd, env, quiet, 'git', [
-      'rev-list',
-      '--count',
-      'HEAD..origin/main',
+    sh(exec, cwd, env, quiet, "git", [
+      "rev-list",
+      "--count",
+      "HEAD..origin/main",
     ]),
-    'git rev-list behind',
-  )
-  const behindRaw = behindR.stdout.trim()
-  const behind = Number.parseInt(behindRaw, 10)
+    "git rev-list behind",
+  );
+  const behindRaw = behindR.stdout.trim();
+  const behind = Number.parseInt(behindRaw, 10);
   if (!Number.isFinite(behind)) {
     fail(
-      `git rev-list behind produced non-numeric count: ${behindRaw || '(empty)'}`,
+      `git rev-list behind produced non-numeric count: ${behindRaw || "(empty)"}`,
       1,
-    )
+    );
   }
   if (behind < 1) {
-    return { stale: false, warning: null, merged: false, action: null }
+    return { stale: false, warning: null, merged: false, action: null };
   }
   const aheadR = mustOk(
-    sh(exec, cwd, env, quiet, 'git', [
-      'rev-list',
-      '--count',
-      'origin/main..HEAD',
+    sh(exec, cwd, env, quiet, "git", [
+      "rev-list",
+      "--count",
+      "origin/main..HEAD",
     ]),
-    'git rev-list ahead',
-  )
-  const ahead = Number.parseInt(aheadR.stdout.trim(), 10)
+    "git rev-list ahead",
+  );
+  const ahead = Number.parseInt(aheadR.stdout.trim(), 10);
   if (!Number.isFinite(ahead)) {
     fail(
-      `git rev-list ahead produced non-numeric count: ${aheadR.stdout.trim() || '(empty)'}`,
+      `git rev-list ahead produced non-numeric count: ${aheadR.stdout.trim() || "(empty)"}`,
       1,
-    )
+    );
   }
   if (ahead === 0) {
-    const warning = `branch tip is behind origin/main by ${behind} commit(s) with no unique commits; recreating via ff-only merge (no rebase/force)`
+    const warning = `branch tip is behind origin/main by ${behind} commit(s) with no unique commits; recreating via ff-only merge (no rebase/force)`;
     mustOk(
-      sh(exec, cwd, env, quiet, 'git', ['merge', '--ff-only', 'origin/main']),
-      'git merge --ff-only origin/main (stale recreate)',
-    )
-    return { stale: true, warning, merged: true, action: 'recreate-ff' }
+      sh(exec, cwd, env, quiet, "git", ["merge", "--ff-only", "origin/main"]),
+      "git merge --ff-only origin/main (stale recreate)",
+    );
+    return { stale: true, warning, merged: true, action: "recreate-ff" };
   }
-  const warning = `branch tip is behind origin/main by ${behind} commit(s) with unique commits; not merging (happy path). Orchestrator refreshes on conflict after sibling merges.`
+  const warning = `branch tip is behind origin/main by ${behind} commit(s) with unique commits; not merging (happy path). Orchestrator refreshes on conflict after sibling merges.`;
   return {
     stale: true,
     warning,
     merged: false,
     action: null,
-  }
+  };
 }
 
 /** True when `cwd` is a linked worktree (its git dir differs from the common dir). */
 export function isLinkedWorktree(exec, cwd, env, quiet) {
-  const r = sh(exec, cwd, env, quiet, 'git', [
-    'rev-parse',
-    '--path-format=absolute',
-    '--git-dir',
-    '--git-common-dir',
-  ])
-  if (r.code !== 0) return false
-  const [gitDir, common] = String(r.stdout).trim().split('\n')
-  return Boolean(gitDir && common && gitDir.trim() !== common.trim())
+  const r = sh(exec, cwd, env, quiet, "git", [
+    "rev-parse",
+    "--path-format=absolute",
+    "--git-dir",
+    "--git-common-dir",
+  ]);
+  if (r.code !== 0) return false;
+  const [gitDir, common] = String(r.stdout).trim().split("\n");
+  return Boolean(gitDir && common && gitDir.trim() !== common.trim());
+}
+
+/**
+ * Slug for preflight. In a linked worktree on a non-main branch, bare preflight must not
+ * switch branches: infer the slug from feat|fix/<slug>, otherwise refuse.
+ * Returns { slug, inferred } ; throws via fail() on an unknown branch.
+ */
+export function resolvePreflightSlug({ slug, linked, currentBranch }) {
+  if (slug) return { slug, inferred: false };
+  const cur = String(currentBranch ?? "").trim();
+  if (!linked || cur === "" || cur === "main")
+    return { slug: null, inferred: false };
+  const s = slugFromFeatFix(cur);
+  if (s) return { slug: s, inferred: true };
+  fail(
+    `preflight without --slug in a linked worktree on branch "${cur}": refusing to switch branches. Run pnpm agent preflight --slug <slug>.`,
+  );
 }
 
 export function cmdPreflight(o, deps) {
-  const { root, cwd, env, exec, quiet } = deps
-  const envInfo = assertEnv(exec, root, cwd, env, quiet)
-  const dirty = porcelain(exec, cwd, env, quiet)
-  if (dirty) fail(`working tree not clean:\n${dirty}`)
+  const { root, cwd, env, exec, quiet } = deps;
+  const envInfo = assertEnv(exec, root, cwd, env, quiet);
+  const dirty = porcelain(exec, cwd, env, quiet);
+  if (dirty) fail(`working tree not clean:\n${dirty}`);
 
-  mustOk(sh(exec, cwd, env, quiet, 'git', ['fetch', 'origin']), 'git fetch')
-  const slugMode = Boolean(o.slug)
+  mustOk(sh(exec, cwd, env, quiet, "git", ["fetch", "origin"]), "git fetch");
   // A linked worktree cannot check out main (held by the primary checkout): branch from origin/main.
-  const linked = isLinkedWorktree(exec, cwd, env, quiet)
+  const linked = isLinkedWorktree(exec, cwd, env, quiet);
+  const curR = sh(exec, cwd, env, quiet, "git", ["branch", "--show-current"]);
+  const resolved = resolvePreflightSlug({
+    slug: o.slug,
+    linked,
+    currentBranch: curR.code === 0 ? curR.stdout : "",
+  });
+  o = { ...o, slug: resolved.slug ?? undefined };
+  const slugMode = Boolean(o.slug);
   if (!slugMode && !linked) {
     mustOk(
-      sh(exec, cwd, env, quiet, 'git', ['switch', 'main']),
-      'git switch main',
-    )
+      sh(exec, cwd, env, quiet, "git", ["switch", "main"]),
+      "git switch main",
+    );
     mustOk(
-      sh(exec, cwd, env, quiet, 'git', ['pull', '--ff-only']),
-      'git pull --ff-only',
-    )
+      sh(exec, cwd, env, quiet, "git", ["pull", "--ff-only"]),
+      "git pull --ff-only",
+    );
   }
 
-  const skips = collectSkipSlugs(exec, cwd, env, quiet, o.skip)
-  const nextArgs = ['-s', 'roadmap', 'next', '--json']
-  if (slugMode) nextArgs.push('--slug', o.slug)
-  else if (skips.length) nextArgs.push('--skip', skips.join(','))
+  const skips = collectSkipSlugs(exec, cwd, env, quiet, o.skip);
+  const nextArgs = ["-s", "roadmap", "next", "--json"];
+  if (slugMode) nextArgs.push("--slug", o.slug);
+  else if (skips.length) nextArgs.push("--skip", skips.join(","));
   const nextR = mustOk(
-    sh(exec, cwd, env, quiet, 'pnpm', nextArgs),
-    'roadmap next',
-  )
-  const item = parseRoadmapNext(nextR.stdout)
-  const branch = `${branchPrefixForItem(item)}/${item.slug}`
-  switchFeatureBranch(exec, cwd, env, quiet, branch, slugMode || linked)
-  const stale = refreshStaleFeatureBranch(exec, root, cwd, env, quiet)
-  const checklistIds = readReviewChecklistIds(root)
+    sh(exec, cwd, env, quiet, "pnpm", nextArgs),
+    "roadmap next",
+  );
+  const item = parseRoadmapNext(nextR.stdout);
+  const branch = `${branchPrefixForItem(item)}/${item.slug}`;
+  switchFeatureBranch(exec, cwd, env, quiet, branch, slugMode || linked);
+  const stale = refreshStaleFeatureBranch(exec, root, cwd, env, quiet);
+  const checklistIds = readReviewChecklistIds(root);
 
-  const liteTrack = isLiteTrack(item)
-  if (!liteTrack) ensureOpenSpecChange(root, item.slug)
+  const liteTrack = isLiteTrack(item);
+  if (!liteTrack) ensureOpenSpecChange(root, item.slug);
 
-  const prepFastTrack = isPrepFastTrack(item, root)
+  const prepFastTrack = isPrepFastTrack(item, root);
   const runCard = liteTrack
     ? {
         change: item.slug,
@@ -1545,28 +1572,30 @@ export function cmdPreflight(o, deps) {
       }
     : buildRunCard(root, item.slug, {
         prepFastTrack,
-      })
+      });
   const primaryId = liteTrack
     ? null
-    : (runCard.ready.find((id) => id === 'proposal') ?? runCard.ready[0] ?? null)
+    : (runCard.ready.find((id) => id === "proposal") ??
+      runCard.ready[0] ??
+      null);
   const instructions = liteTrack
-    ? { artifact: 'lite', rules: [], template: LITE_APPLY_PROCEDURE }
+    ? { artifact: "lite", rules: [], template: LITE_APPLY_PROCEDURE }
     : primaryId
       ? runCard.artifacts[primaryId]
-      : loadArtifactInstructions(root, 'proposal', item.slug)
+      : loadArtifactInstructions(root, "proposal", item.slug);
   if (!Array.isArray(instructions.rules))
-    fail('openspec instructions missing rules array')
+    fail("openspec instructions missing rules array");
 
-  const designPath = path.join('openspec', 'changes', item.slug, 'design.md')
+  const designPath = path.join("openspec", "changes", item.slug, "design.md");
   const touchSet = liteTrack
-    ? 'lite track (no openspec/changes)'
+    ? "lite track (no openspec/changes)"
     : fs.existsSync(path.join(root, designPath))
       ? designPath
       : prepFastTrack
-        ? 'prep fast-track (design.md optional)'
-        : 'TBD until design.md'
+        ? "prep fast-track (design.md optional)"
+        : "TBD until design.md";
 
-  ensureRunStarted(root, branch, Date.now(), exec)
+  ensureRunStarted(root, branch, Date.now(), exec);
 
   return {
     ok: true,
@@ -1590,67 +1619,67 @@ export function cmdPreflight(o, deps) {
     instructions,
     runCard,
     touchSet,
-  }
+  };
 }
 
 export function assertFinishBranch(exec, cwd, env, quiet) {
   const branchR = mustOk(
-    sh(exec, cwd, env, quiet, 'git', ['branch', '--show-current']),
-    'git branch',
-  )
-  const branch = branchR.stdout.trim()
+    sh(exec, cwd, env, quiet, "git", ["branch", "--show-current"]),
+    "git branch",
+  );
+  const branch = branchR.stdout.trim();
   if (!isFeatureBranch(branch))
     fail(
       `finish refuses branch "${branch}" (need feat/* or fix/* with commits ahead of origin/main)`,
       1,
-    )
+    );
   const aheadR = mustOk(
-    sh(exec, cwd, env, quiet, 'git', [
-      'rev-list',
-      '--count',
-      'origin/main..HEAD',
+    sh(exec, cwd, env, quiet, "git", [
+      "rev-list",
+      "--count",
+      "origin/main..HEAD",
     ]),
-    'git rev-list',
-  )
-  const ahead = Number.parseInt(aheadR.stdout.trim(), 10)
+    "git rev-list",
+  );
+  const ahead = Number.parseInt(aheadR.stdout.trim(), 10);
   if (!Number.isFinite(ahead) || ahead < 1)
     fail(
-      `finish refuses: no commits ahead of origin/main (ahead=${aheadR.stdout.trim() || '0'})`,
+      `finish refuses: no commits ahead of origin/main (ahead=${aheadR.stdout.trim() || "0"})`,
       1,
-    )
-  return { branch, ahead }
+    );
+  return { branch, ahead };
 }
 
-const TRIVIAL_MERGE_FILES = new Set(['docs/roadmap.md', 'pnpm-lock.yaml'])
+const TRIVIAL_MERGE_FILES = new Set(["docs/roadmap.md", "pnpm-lock.yaml"]);
 
 function splitFileLines(text) {
-  const lines = String(text).split('\n')
-  if (lines.length && lines[lines.length - 1] === '') lines.pop()
-  return lines
+  const lines = String(text).split("\n");
+  if (lines.length && lines[lines.length - 1] === "") lines.pop();
+  return lines;
 }
 
 function joinFileLines(lines) {
-  return lines.length ? `${lines.join('\n')}\n` : ''
+  return lines.length ? `${lines.join("\n")}\n` : "";
 }
 
 /** Insert segments between successive base lines; null if a base line was dropped. */
 function insertSegments(side, base) {
-  const segs = []
-  let si = 0
+  const segs = [];
+  let si = 0;
   for (let bi = 0; bi < base.length; bi++) {
-    const insert = []
-    while (si < side.length && side[si] !== base[bi]) insert.push(side[si++])
-    if (si >= side.length || side[si] !== base[bi]) return null
-    segs.push(insert)
-    si++
+    const insert = [];
+    while (si < side.length && side[si] !== base[bi]) insert.push(side[si++]);
+    if (si >= side.length || side[si] !== base[bi]) return null;
+    segs.push(insert);
+    si++;
   }
-  segs.push(side.slice(si))
-  return segs
+  segs.push(side.slice(si));
+  return segs;
 }
 
 function unionInserts(oursIns, theirsIns) {
-  const seen = new Set(oursIns)
-  return [...oursIns, ...theirsIns.filter((l) => !seen.has(l))]
+  const seen = new Set(oursIns);
+  return [...oursIns, ...theirsIns.filter((l) => !seen.has(l))];
 }
 
 /**
@@ -1659,32 +1688,32 @@ function unionInserts(oursIns, theirsIns) {
  * @returns {string|null}
  */
 export function resolvePureAddIndexConflict(baseText, oursText, theirsText) {
-  const base = splitFileLines(baseText)
-  const ours = splitFileLines(oursText)
-  const theirs = splitFileLines(theirsText)
-  const oSeg = insertSegments(ours, base)
-  const tSeg = insertSegments(theirs, base)
-  if (!oSeg || !tSeg) return null
-  const out = []
+  const base = splitFileLines(baseText);
+  const ours = splitFileLines(oursText);
+  const theirs = splitFileLines(theirsText);
+  const oSeg = insertSegments(ours, base);
+  const tSeg = insertSegments(theirs, base);
+  if (!oSeg || !tSeg) return null;
+  const out = [];
   for (let i = 0; i < base.length; i++) {
-    out.push(...unionInserts(oSeg[i], tSeg[i]))
-    out.push(base[i])
+    out.push(...unionInserts(oSeg[i], tSeg[i]));
+    out.push(base[i]);
   }
-  out.push(...unionInserts(oSeg[base.length], tSeg[base.length]))
-  return joinFileLines(out)
+  out.push(...unionInserts(oSeg[base.length], tSeg[base.length]));
+  return joinFileLines(out);
 }
 
 function readGitStages(root, rel, exec) {
-  const stages = []
+  const stages = [];
   for (const stage of [1, 2, 3]) {
-    const r = exec('git', ['show', `:${stage}:${rel}`], {
+    const r = exec("git", ["show", `:${stage}:${rel}`], {
       cwd: root,
       env: process.env,
-    })
-    if (r.code !== 0) return null
-    stages.push(r.stdout)
+    });
+    if (r.code !== 0) return null;
+    stages.push(r.stdout);
   }
-  return { base: stages[0], ours: stages[1], theirs: stages[2] }
+  return { base: stages[0], ours: stages[1], theirs: stages[2] };
 }
 
 /**
@@ -1697,111 +1726,110 @@ export function tryResolveTrivialConflicts(
   conflicted,
   exec = defaultExec,
 ) {
-  const files = [...new Set(conflicted)]
-  if (files.includes('package.json')) return false
-  if (!files.every((f) => TRIVIAL_MERGE_FILES.has(f))) return false
+  const files = [...new Set(conflicted)];
+  if (files.includes("package.json")) return false;
+  if (!files.every((f) => TRIVIAL_MERGE_FILES.has(f))) return false;
 
-  if (files.includes('docs/roadmap.md')) {
-    const stages = readGitStages(root, 'docs/roadmap.md', exec)
-    if (!stages) return false
+  if (files.includes("docs/roadmap.md")) {
+    const stages = readGitStages(root, "docs/roadmap.md", exec);
+    if (!stages) return false;
     const resolved = resolvePureAddIndexConflict(
       stages.base,
       stages.ours,
       stages.theirs,
-    )
-    if (resolved === null) return false
-    fs.writeFileSync(path.join(root, 'docs/roadmap.md'), resolved)
+    );
+    if (resolved === null) return false;
+    fs.writeFileSync(path.join(root, "docs/roadmap.md"), resolved);
   }
-  return true
+  return true;
 }
 
 function refuseMergeConflict(files) {
   fail(
-    `cannot auto-resolve conflict with origin/main (files: ${files.join(', ') || 'unknown'}). Resolve per git-finish.mdc, then run finish again.`,
+    `cannot auto-resolve conflict with origin/main (files: ${files.join(", ") || "unknown"}). Resolve per git-finish.mdc, then run finish again.`,
     1,
-  )
+  );
 }
 
 export function mergeOriginMainIfNeeded(exec, root, cwd, env, quiet) {
-  mustOk(sh(exec, cwd, env, quiet, 'git', ['fetch', 'origin']), 'git fetch')
-  const anc = sh(exec, cwd, env, quiet, 'git', [
-    'merge-base',
-    '--is-ancestor',
-    'origin/main',
-    'HEAD',
-  ])
-  if (anc.code === 0) return { merged: false }
-  const merge = sh(exec, cwd, env, quiet, 'git', ['merge', 'origin/main'])
-  if (merge.code === 0) return { merged: true }
-  const unmerged = sh(exec, cwd, env, quiet, 'git', [
-    'diff',
-    '--name-only',
-    '--diff-filter=U',
-  ])
+  mustOk(sh(exec, cwd, env, quiet, "git", ["fetch", "origin"]), "git fetch");
+  const anc = sh(exec, cwd, env, quiet, "git", [
+    "merge-base",
+    "--is-ancestor",
+    "origin/main",
+    "HEAD",
+  ]);
+  if (anc.code === 0) return { merged: false };
+  const merge = sh(exec, cwd, env, quiet, "git", ["merge", "origin/main"]);
+  if (merge.code === 0) return { merged: true };
+  const unmerged = sh(exec, cwd, env, quiet, "git", [
+    "diff",
+    "--name-only",
+    "--diff-filter=U",
+  ]);
   const files = unmerged.stdout
-    .split('\n')
+    .split("\n")
     .map((l) => l.trim())
-    .filter(Boolean)
+    .filter(Boolean);
   if (!files.length || !tryResolveTrivialConflicts(root, files, exec))
-    refuseMergeConflict(files)
-  if (files.includes('pnpm-lock.yaml')) {
-    mustOk(sh(exec, cwd, env, quiet, 'pnpm', ['install']), 'pnpm install')
+    refuseMergeConflict(files);
+  if (files.includes("pnpm-lock.yaml")) {
+    mustOk(sh(exec, cwd, env, quiet, "pnpm", ["install"]), "pnpm install");
   }
-  if (files.includes('docs/roadmap.md')) {
-    const check = sh(exec, cwd, env, quiet, 'pnpm', ['-s', 'roadmap', 'check'])
+  if (files.includes("docs/roadmap.md")) {
+    const check = sh(exec, cwd, env, quiet, "pnpm", ["-s", "roadmap", "check"]);
     if (check.code !== 0) {
       fail(
         `roadmap check failed after auto-resolving docs/roadmap.md (semantic conflict). Resolve per git-finish.mdc, then run finish again.\n${tailOutput(check.stdout, check.stderr)}`,
         1,
-      )
+      );
     }
   }
   for (const f of files) {
-    mustOk(sh(exec, cwd, env, quiet, 'git', ['add', '--', f]), `git add ${f}`)
+    mustOk(sh(exec, cwd, env, quiet, "git", ["add", "--", f]), `git add ${f}`);
   }
   mustOk(
-    sh(exec, cwd, env, quiet, 'git', [
-      'commit',
-      '--no-edit',
-      '-m',
-      'merge origin/main (trivial conflicts)',
+    sh(exec, cwd, env, quiet, "git", [
+      "commit",
+      "--no-edit",
+      "-m",
+      "merge origin/main (trivial conflicts)",
     ]),
-    'git commit merge',
-  )
-  return { merged: true, resolved: files }
+    "git commit merge",
+  );
+  return { merged: true, resolved: files };
 }
-
 
 /** Parse OpenSpec delta requirement names from a change spec.md. */
 export function parseDeltaRequirementNames(text) {
-  const added = []
-  const modified = []
-  const removed = []
-  let section = null
-  for (const line of String(text ?? '').split('\n')) {
+  const added = [];
+  const modified = [];
+  const removed = [];
+  let section = null;
+  for (const line of String(text ?? "").split("\n")) {
     if (/^##\s+ADDED\s+Requirements/i.test(line)) {
-      section = 'added'
-      continue
+      section = "added";
+      continue;
     }
     if (/^##\s+MODIFIED\s+Requirements/i.test(line)) {
-      section = 'modified'
-      continue
+      section = "modified";
+      continue;
     }
     if (/^##\s+REMOVED\s+Requirements/i.test(line)) {
-      section = 'removed'
-      continue
+      section = "removed";
+      continue;
     }
     if (/^##\s+/.test(line)) {
-      section = null
-      continue
+      section = null;
+      continue;
     }
-    const m = /^###\s+Requirement:\s+(.+?)\s*$/.exec(line)
-    if (!m || !section) continue
-    if (section === 'added') added.push(m[1])
-    else if (section === 'modified') modified.push(m[1])
-    else if (section === 'removed') removed.push(m[1])
+    const m = /^###\s+Requirement:\s+(.+?)\s*$/.exec(line);
+    if (!m || !section) continue;
+    if (section === "added") added.push(m[1]);
+    else if (section === "modified") modified.push(m[1]);
+    else if (section === "removed") removed.push(m[1]);
   }
-  return { added, modified, removed }
+  return { added, modified, removed };
 }
 
 /**
@@ -1810,74 +1838,72 @@ export function parseDeltaRequirementNames(text) {
  * No change dir / .skip-specs / empty specs → ok ("No delta specs").
  */
 export function assertDeltaSpecsSynced(root, slug) {
-  const changeDir = path.join(root, 'openspec', 'changes', slug)
+  const changeDir = path.join(root, "openspec", "changes", slug);
   if (!fs.existsSync(changeDir)) {
-    return { ok: true, note: `no change dir for ${slug}` }
+    return { ok: true, note: `no change dir for ${slug}` };
   }
-  if (fs.existsSync(path.join(changeDir, '.skip-specs'))) {
-    return { ok: true, note: 'No delta specs (.skip-specs)' }
+  if (fs.existsSync(path.join(changeDir, ".skip-specs"))) {
+    return { ok: true, note: "No delta specs (.skip-specs)" };
   }
-  const specsRoot = path.join(changeDir, 'specs')
+  const specsRoot = path.join(changeDir, "specs");
   if (!fs.existsSync(specsRoot)) {
-    return { ok: true, note: 'No delta specs' }
+    return { ok: true, note: "No delta specs" };
   }
   const caps = fs
     .readdirSync(specsRoot, { withFileTypes: true })
     .filter((d) => d.isDirectory())
     .map((d) => d.name)
-    .sort()
-  if (caps.length === 0) return { ok: true, note: 'No delta specs' }
+    .sort();
+  if (caps.length === 0) return { ok: true, note: "No delta specs" };
 
-  const problems = []
+  const problems = [];
   for (const cap of caps) {
-    const deltaPath = path.join(specsRoot, cap, 'spec.md')
-    if (!fs.existsSync(deltaPath)) continue
-    const delta = fs.readFileSync(deltaPath, 'utf8')
-    const mainPath = path.join(root, 'openspec', 'specs', cap, 'spec.md')
+    const deltaPath = path.join(specsRoot, cap, "spec.md");
+    if (!fs.existsSync(deltaPath)) continue;
+    const delta = fs.readFileSync(deltaPath, "utf8");
+    const mainPath = path.join(root, "openspec", "specs", cap, "spec.md");
     if (!fs.existsSync(mainPath)) {
-      problems.push(
-        `missing openspec/specs/${cap}/spec.md (delta not synced)`,
-      )
-      continue
+      problems.push(`missing openspec/specs/${cap}/spec.md (delta not synced)`);
+      continue;
     }
-    const main = fs.readFileSync(mainPath, 'utf8')
-    const { added, modified, removed } = parseDeltaRequirementNames(delta)
+    const main = fs.readFileSync(mainPath, "utf8");
+    const { added, modified, removed } = parseDeltaRequirementNames(delta);
     for (const name of [...added, ...modified]) {
       if (!main.includes(`### Requirement: ${name}`)) {
         problems.push(
           `openspec/specs/${cap}/spec.md missing Requirement: ${name}`,
-        )
+        );
       }
     }
     for (const name of removed) {
       if (main.includes(`### Requirement: ${name}`)) {
         problems.push(
           `openspec/specs/${cap}/spec.md still has removed Requirement: ${name}`,
-        )
+        );
       }
     }
   }
   if (problems.length) {
-    fail(`delta-spec sync check failed:\n${problems.join('\n')}`, 1)
+    fail(`delta-spec sync check failed:\n${problems.join("\n")}`, 1);
   }
-  return { ok: true, note: `synced ${caps.length} capability delta(s)` }
+  return { ok: true, note: `synced ${caps.length} capability delta(s)` };
 }
 
 function resolveFinalizeSlug(o, deps) {
-  const { cwd, env, exec, quiet } = deps
-  let slug = o._[1] || o.change
+  const { cwd, env, exec, quiet } = deps;
+  let slug = o._[1] || o.change;
   if (!slug) {
     const br = mustOk(
-      sh(exec, cwd, env, quiet, 'git', ['branch', '--show-current']),
-      'git branch',
-    )
-    slug = slugFromBranch(br.stdout.trim())
+      sh(exec, cwd, env, quiet, "git", ["branch", "--show-current"]),
+      "git branch",
+    );
+    slug = slugFromBranch(br.stdout.trim());
   }
-  if (!slug) fail('usage: pnpm agent finalize <slug> [--change S]')
+  if (!slug) fail("usage: pnpm agent finalize <slug> [--change S]");
   if (o._[1] && o.change && o._[1] !== o.change) {
-    fail(`slug mismatch: positional ${o._[1]} vs --change ${o.change}`)
+    fail(`slug mismatch: positional ${o._[1]} vs --change ${o.change}`);
   }
-  return slug
+  return slug;
 }
 
 /**
@@ -1886,127 +1912,128 @@ function resolveFinalizeSlug(o, deps) {
  * Prints only failures + one OK line (see fmtFinalize).
  */
 export function cmdFinalize(o, deps) {
-  const { root, cwd, env, exec, quiet } = deps
-  assertEnv(exec, root, cwd, env, quiet)
-  const slug = resolveFinalizeSlug(o, deps)
+  const { root, cwd, env, exec, quiet } = deps;
+  assertEnv(exec, root, cwd, env, quiet);
+  const slug = resolveFinalizeSlug(o, deps);
 
-  const dirty0 = porcelain(exec, cwd, env, quiet)
-  if (dirty0) fail(`working tree not clean (commit first):\n${dirty0}`, 1)
+  const dirty0 = porcelain(exec, cwd, env, quiet);
+  if (dirty0) fail(`working tree not clean (commit first):\n${dirty0}`, 1);
 
-  const sync = assertDeltaSpecsSynced(root, slug)
+  const sync = assertDeltaSpecsSynced(root, slug);
 
-  const archived = archiveOpenSpecChange(root, slug)
+  const archived = archiveOpenSpecChange(root, slug);
 
-  const doneR = sh(exec, cwd, env, quiet, 'pnpm', [
-    '-s',
-    'roadmap',
-    'done',
+  const doneR = sh(exec, cwd, env, quiet, "pnpm", [
+    "-s",
+    "roadmap",
+    "done",
     slug,
-  ])
+  ]);
   if (doneR.code !== 0) {
-    const msg = tailOutput(doneR.stdout, doneR.stderr)
+    const msg = tailOutput(doneR.stdout, doneR.stderr);
     if (!/already done/i.test(msg)) {
       return {
         ok: false,
         slug,
-        stage: 'roadmap-done',
+        stage: "roadmap-done",
         sync,
         archived,
         summary: msg,
-      }
+      };
     }
   }
   // No `roadmap sync` here: ticking the docs/roadmap.md index in every PR made
   // parallel PRs conflict on adjacent checklist lines. The item file carries
   // Status: done; `roadmap check` only warns until a post-merge sync/archive.
-  const dirty = porcelain(exec, cwd, env, quiet)
-  let committed = false
+  const dirty = porcelain(exec, cwd, env, quiet);
+  let committed = false;
   if (dirty) {
     mustOk(
-      sh(exec, cwd, env, quiet, 'git', [
-        'add',
-        '-A',
-        '--',
-        'openspec',
-        'docs/roadmap.md',
-        'docs/roadmap',
+      sh(exec, cwd, env, quiet, "git", [
+        "add",
+        "-A",
+        "--",
+        "openspec",
+        "docs/roadmap.md",
+        "docs/roadmap",
       ]),
-      'git add archive/roadmap',
-    )
+      "git add archive/roadmap",
+    );
     const unexpected = porcelain(exec, cwd, env, quiet)
-      .split('\n')
+      .split("\n")
       .map((l) => l.trim())
       .filter(Boolean)
       .filter((l) => {
-        const pathPart = l.length >= 3 ? l.slice(3) : l
-        const p = pathPart.includes(' -> ')
-          ? pathPart.split(' -> ').at(-1)
-          : pathPart
-        if (p === 'openspec' || p.startsWith('openspec/')) return false
-        if (p === 'docs/roadmap.md' || p.startsWith('docs/roadmap')) return false
-        return true
-      })
+        const pathPart = l.length >= 3 ? l.slice(3) : l;
+        const p = pathPart.includes(" -> ")
+          ? pathPart.split(" -> ").at(-1)
+          : pathPart;
+        if (p === "openspec" || p.startsWith("openspec/")) return false;
+        if (p === "docs/roadmap.md" || p.startsWith("docs/roadmap"))
+          return false;
+        return true;
+      });
     if (unexpected.length) {
       return {
         ok: false,
         slug,
-        stage: 'commit',
+        stage: "commit",
         sync,
         archived,
-        summary: `unexpected dirty paths after archive/roadmap:\n${unexpected.join('\n')}`,
-      }
+        summary: `unexpected dirty paths after archive/roadmap:\n${unexpected.join("\n")}`,
+      };
     }
-    const commitR = sh(exec, cwd, env, quiet, 'git', [
-      'commit',
-      '-m',
+    const commitR = sh(exec, cwd, env, quiet, "git", [
+      "commit",
+      "-m",
       `chore(${slug}): archive + roadmap done`,
-    ])
+    ]);
     if (commitR.code !== 0) {
       return {
         ok: false,
         slug,
-        stage: 'commit',
+        stage: "commit",
         sync,
         archived,
         summary: tailOutput(commitR.stdout, commitR.stderr),
-      }
+      };
     }
-    committed = true
+    committed = true;
   }
 
-  const integrity = sh(exec, cwd, env, quiet, 'pnpm', [
-    '-s',
-    'check:integrity',
-  ])
+  const integrity = sh(exec, cwd, env, quiet, "pnpm", [
+    "-s",
+    "check:integrity",
+  ]);
   if (integrity.code !== 0) {
     return {
       ok: false,
       slug,
-      stage: 'check:integrity',
+      stage: "check:integrity",
       sync,
       archived,
       committed,
       summary: tailOutput(integrity.stdout, integrity.stderr),
-    }
+    };
   }
 
-  const selfCheck = sh(exec, cwd, env, quiet, 'pnpm', [
-    '-s',
-    'quality:self-check',
-  ])
+  const selfCheck = sh(exec, cwd, env, quiet, "pnpm", [
+    "-s",
+    "quality:self-check",
+  ]);
   if (selfCheck.code !== 0) {
     return {
       ok: false,
       slug,
-      stage: 'quality:self-check',
+      stage: "quality:self-check",
       sync,
       archived,
       committed,
       summary: tailOutput(selfCheck.stdout, selfCheck.stderr),
-    }
+    };
   }
 
-  const stamp = writeGreenTreeStamp(root, { exec, cwd, env })
+  const stamp = writeGreenTreeStamp(root, { exec, cwd, env });
   return {
     ok: true,
     slug,
@@ -2016,22 +2043,22 @@ export function cmdFinalize(o, deps) {
     stamp,
     path: greenTreeStampPath(root),
     summary: `finalize ${slug} ok`,
-  }
+  };
 }
 
 export function cmdStampGreen(_o, deps) {
-  const { root, cwd, env, exec } = deps
-  const stamp = writeGreenTreeStamp(root, { exec, cwd, env })
+  const { root, cwd, env, exec } = deps;
+  const stamp = writeGreenTreeStamp(root, { exec, cwd, env });
   return {
     ok: true,
     stamp,
     path: greenTreeStampPath(root),
     summary: `green-tree stamp written: ${stamp}`,
-  }
+  };
 }
 
 export function cmdCiBrief(o, deps) {
-  const { root, cwd, env, exec, quiet } = deps
+  const { root, cwd, env, exec, quiet } = deps;
   try {
     return runCiBrief({
       exec,
@@ -2043,15 +2070,15 @@ export function cmdCiBrief(o, deps) {
       watch: !!o.watch,
       sleep: deps.sleep,
       now: deps.now,
-    })
+    });
   } catch (e) {
-    if (e instanceof CiBriefError) fail(e.message, e.exitCode)
-    throw e
+    if (e instanceof CiBriefError) fail(e.message, e.exitCode);
+    throw e;
   }
 }
 
 export function cmdCiWait(o, deps) {
-  const { root, cwd, env, exec, quiet } = deps
+  const { root, cwd, env, exec, quiet } = deps;
   try {
     return runCiWait({
       exec,
@@ -2063,38 +2090,40 @@ export function cmdCiWait(o, deps) {
       timeout: o.timeout,
       sleep: deps.sleep,
       now: deps.now,
-    })
+    });
   } catch (e) {
-    if (e instanceof CiBriefError) fail(e.message, e.exitCode)
-    throw e
+    if (e instanceof CiBriefError) fail(e.message, e.exitCode);
+    throw e;
   }
 }
 
-const STRYKER_STATE_FILE = 'agent-finish-stryker.json'
-export const STRYKER_FINISH_CAP = 2
+const STRYKER_STATE_FILE = "agent-finish-stryker.json";
+export const STRYKER_FINISH_CAP = 2;
 
 export function readStrykerState(root, exec = defaultExec) {
-  const p = gitPath(root, STRYKER_STATE_FILE, exec)
-  if (!fs.existsSync(p)) return {}
+  const p = gitPath(root, STRYKER_STATE_FILE, exec);
+  if (!fs.existsSync(p)) return {};
   try {
-    return JSON.parse(fs.readFileSync(p, 'utf8'))
+    return JSON.parse(fs.readFileSync(p, "utf8"));
   } catch {
-    return {}
+    return {};
   }
 }
 
 export function writeStrykerState(root, map, exec = defaultExec) {
-  const p = gitPath(root, STRYKER_STATE_FILE, exec)
-  fs.mkdirSync(path.dirname(p), { recursive: true })
-  fs.writeFileSync(p, JSON.stringify(map, null, 0) + '\n')
+  const p = gitPath(root, STRYKER_STATE_FILE, exec);
+  fs.mkdirSync(path.dirname(p), { recursive: true });
+  fs.writeFileSync(p, JSON.stringify(map, null, 0) + "\n");
 }
 
 export function hostHasStrykerDiff(root) {
   try {
-    const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'))
-    return typeof pkg?.scripts?.['stryker:diff'] === 'string'
+    const pkg = JSON.parse(
+      fs.readFileSync(path.join(root, "package.json"), "utf8"),
+    );
+    return typeof pkg?.scripts?.["stryker:diff"] === "string";
   } catch {
-    return false
+    return false;
   }
 }
 
@@ -2107,72 +2136,83 @@ export function hostHasStrykerDiff(root) {
  * @returns {{ status: 'skip' | 'pass' | 'block' | 'warn', attempts: number, detail: string }}
  */
 export function finishStrykerGate(deps, branch) {
-  const { root, cwd, env, exec, quiet } = deps
+  const { root, cwd, env, exec, quiet } = deps;
   if (!hostHasStrykerDiff(root))
-    return { status: 'skip', attempts: 0, detail: '' }
-  const diff = sh(exec, cwd, env, quiet, 'git', [
-    'diff',
-    '--name-only',
-    'origin/main...HEAD',
-  ])
-  const changed = diff.stdout.split('\n').map((l) => l.trim())
-  if (diff.code !== 0 || !changed.some((f) => f.startsWith('src/')))
-    return { status: 'skip', attempts: 0, detail: '' }
-  const head = sh(exec, cwd, env, quiet, 'git', ['rev-parse', 'HEAD']).stdout.trim()
-  const state = readStrykerState(root, exec)
-  const prev = state[branch] ?? { attempts: 0, passSha: null }
+    return { status: "skip", attempts: 0, detail: "" };
+  const diff = sh(exec, cwd, env, quiet, "git", [
+    "diff",
+    "--name-only",
+    "origin/main...HEAD",
+  ]);
+  const changed = diff.stdout.split("\n").map((l) => l.trim());
+  if (diff.code !== 0 || !changed.some((f) => f.startsWith("src/")))
+    return { status: "skip", attempts: 0, detail: "" };
+  const head = sh(exec, cwd, env, quiet, "git", [
+    "rev-parse",
+    "HEAD",
+  ]).stdout.trim();
+  const state = readStrykerState(root, exec);
+  const prev = state[branch] ?? { attempts: 0, passSha: null };
   if (head && prev.passSha === head)
-    return { status: 'pass', attempts: prev.attempts, detail: 'cached pass' }
-  const r = sh(exec, cwd, env, quiet, 'pnpm', ['-s', 'stryker:diff'])
+    return { status: "pass", attempts: prev.attempts, detail: "cached pass" };
+  const r = sh(exec, cwd, env, quiet, "pnpm", ["-s", "stryker:diff"]);
   if (r.code === 0) {
-    writeStrykerState(root, { ...state, [branch]: { attempts: prev.attempts, passSha: head } }, exec)
-    return { status: 'pass', attempts: prev.attempts, detail: '' }
+    writeStrykerState(
+      root,
+      { ...state, [branch]: { attempts: prev.attempts, passSha: head } },
+      exec,
+    );
+    return { status: "pass", attempts: prev.attempts, detail: "" };
   }
-  const attempts = prev.attempts + 1
-  writeStrykerState(root, { ...state, [branch]: { attempts, passSha: null } }, exec)
-  const detail = tailOutput(r.stdout, r.stderr, 25)
+  const attempts = prev.attempts + 1;
+  writeStrykerState(
+    root,
+    { ...state, [branch]: { attempts, passSha: null } },
+    exec,
+  );
+  const detail = tailOutput(r.stdout, r.stderr, 25);
   return {
-    status: attempts >= STRYKER_FINISH_CAP ? 'warn' : 'block',
+    status: attempts >= STRYKER_FINISH_CAP ? "warn" : "block",
     attempts,
     detail,
-  }
+  };
 }
 
 export function strykerWarningLine(attempts) {
-  return `stryker: deferred to C-session (agent finish: stryker:diff still below the break threshold or NoCoverage > 0 after ${attempts} runs)`
+  return `stryker: deferred to C-session (agent finish: stryker:diff still below the break threshold or NoCoverage > 0 after ${attempts} runs)`;
 }
 
 export function cmdFinish(o, deps) {
-  const { root, cwd, env, exec, quiet } = deps
-  assertEnv(exec, root, cwd, env, quiet)
-  const dirty = porcelain(exec, cwd, env, quiet)
-  if (dirty) fail(`working tree not clean (commit first):\n${dirty}`, 1)
+  const { root, cwd, env, exec, quiet } = deps;
+  assertEnv(exec, root, cwd, env, quiet);
+  const dirty = porcelain(exec, cwd, env, quiet);
+  if (dirty) fail(`working tree not clean (commit first):\n${dirty}`, 1);
 
-  const { branch, ahead } = assertFinishBranch(exec, cwd, env, quiet)
+  const { branch, ahead } = assertFinishBranch(exec, cwd, env, quiet);
 
-  const fails = readPushFailures(root, exec)
-  const prior = Number(fails[branch] ?? 0)
+  const fails = readPushFailures(root, exec);
+  const prior = Number(fails[branch] ?? 0);
   if (prior >= 2) {
     return {
       ok: false,
-      stage: 'push',
+      stage: "push",
       pushAttempts: prior,
       branch,
       ahead,
       summary: `push budget exhausted for ${branch} (${prior} failed attempts recorded under .git/${PUSH_FAIL_FILE})`,
-    }
+    };
   }
 
-  const stryker = (deps.finishStrykerGate ?? finishStrykerGate)(deps, branch)
-  if (stryker.status === 'block') {
+  const stryker = (deps.finishStrykerGate ?? finishStrykerGate)(deps, branch);
+  if (stryker.status === "block") {
     return {
       ok: false,
-      stage: 'stryker',
+      stage: "stryker",
       strykerAttempts: stryker.attempts,
       branch,
       ahead,
       summary: `stryker:diff failed (run ${stryker.attempts}/${STRYKER_FINISH_CAP}); kill the survivors with real tests, commit, then re-run finish. After run ${STRYKER_FINISH_CAP} finish proceeds with a PR-body warning.\n${stryker.detail}`,
-    }
+    };
   }
 
   // Thin finish: push + PR only. Stage-11 stamp + AGENT_THIN_FINISH let
@@ -2181,128 +2221,144 @@ export function cmdFinish(o, deps) {
   const stampCurrent = (
     deps.isGreenTreeStampCurrent ??
     ((r) => isGreenTreeStampCurrent(r, { exec, cwd, env }))
-  )(root)
+  )(root);
   const stampNote = stampCurrent
-    ? 'green-tree stamp current (A/C1/C2 ritual already stamped); '
-    : 'warning: stage-11 green-tree stamp missing or stale (finish is thin; pre-push still runs A+C1 unless stamp matches); '
+    ? "green-tree stamp current (A/C1/C2 ritual already stamped); "
+    : "warning: stage-11 green-tree stamp missing or stale (finish is thin; pre-push still runs A+C1 unless stamp matches); ";
 
-  const pushEnv = { ...env, AGENT_THIN_FINISH: '1' }
-  const lastPush = sh(exec, cwd, env, quiet, 'git', [
-    'push',
-    '-q',
-    '-u',
-    'origin',
-    'HEAD',
-  ], { env: pushEnv })
-  const pushMsg = `${lastPush.stdout}\n${lastPush.stderr}`
+  const pushEnv = { ...env, AGENT_THIN_FINISH: "1" };
+  const lastPush = sh(
+    exec,
+    cwd,
+    env,
+    quiet,
+    "git",
+    ["push", "-q", "-u", "origin", "HEAD"],
+    { env: pushEnv },
+  );
+  const pushMsg = `${lastPush.stdout}\n${lastPush.stderr}`;
   if (
     lastPush.code !== 0 &&
     /non-fast-forward|fetch first|\[rejected\]|updates were rejected/i.test(
       pushMsg,
     )
   ) {
-    const next = prior + 1
-    writePushFailures(root, { ...fails, [branch]: next }, exec)
+    const next = prior + 1;
+    writePushFailures(root, { ...fails, [branch]: next }, exec);
     return {
       ok: false,
-      stage: 'push',
+      stage: "push",
       pushAttempts: next,
       branch,
       ahead,
       stampCurrent,
       summary: `${stampNote}push rejected (non-fast-forward). Finish does not merge origin/main; orchestrator should refresh/rebase, then re-run finish.\n${summarizePushFailure(lastPush.stdout, lastPush.stderr)}`,
-    }
+    };
   }
   if (lastPush.code !== 0) {
-    const next = prior + 1
-    writePushFailures(root, { ...fails, [branch]: next }, exec)
+    const next = prior + 1;
+    writePushFailures(root, { ...fails, [branch]: next }, exec);
     return {
       ok: false,
-      stage: 'push',
+      stage: "push",
       pushAttempts: next,
       branch,
       ahead,
       stampCurrent,
       summary: `${stampNote}${summarizePushFailure(lastPush.stdout, lastPush.stderr)}`,
-    }
+    };
   }
   if (fails[branch] !== undefined) {
-    const rest = { ...fails }
-    delete rest[branch]
-    writePushFailures(root, rest, exec)
+    const rest = { ...fails };
+    delete rest[branch];
+    writePushFailures(root, rest, exec);
   }
 
-  const existing = sh(exec, cwd, env, quiet, 'gh', [
-    'pr',
-    'list',
-    '--head',
+  const existing = sh(exec, cwd, env, quiet, "gh", [
+    "pr",
+    "list",
+    "--head",
     branch,
-    '--json',
-    'number,url',
-    '-q',
-    '.[0]',
-  ])
-  let prUrl = null
-  let prNumber = null
-  let created = false
+    "--json",
+    "number,url",
+    "-q",
+    ".[0]",
+  ]);
+  let prUrl = null;
+  let prNumber = null;
+  let created = false;
   if (
     existing.code === 0 &&
     existing.stdout.trim() &&
-    existing.stdout.trim() !== 'null'
+    existing.stdout.trim() !== "null"
   ) {
     try {
-      const j = JSON.parse(existing.stdout)
-      prNumber = j.number ?? null
-      prUrl = j.url ?? null
+      const j = JSON.parse(existing.stdout);
+      prNumber = j.number ?? null;
+      prUrl = j.url ?? null;
     } catch {
       /* ignore */
     }
   }
 
-  let metrics = null
+  let metrics = null;
   if (!prNumber) {
-    if (!o.title) fail('finish create needs --title')
-    let bodyPath
-    if (o['body-file']) {
-      bodyPath = path.resolve(cwd, o['body-file'])
-      if (!fs.existsSync(bodyPath)) fail(`body file missing: ${bodyPath}`)
+    if (!o.title) fail("finish create needs --title");
+    let bodyPath;
+    if (o["body-file"]) {
+      bodyPath = path.resolve(cwd, o["body-file"]);
+      if (!fs.existsSync(bodyPath)) fail(`body file missing: ${bodyPath}`);
     } else {
-      bodyPath = resolveGitRelPath(root, PR_BODY_PREFILL_FILE, exec)
-      fs.mkdirSync(path.dirname(bodyPath), { recursive: true })
-      fs.writeFileSync(bodyPath, buildPrefilledBody(root, branch, exec))
+      bodyPath = resolveGitRelPath(root, PR_BODY_PREFILL_FILE, exec);
+      fs.mkdirSync(path.dirname(bodyPath), { recursive: true });
+      fs.writeFileSync(bodyPath, buildPrefilledBody(root, branch, exec));
     }
-    metrics = buildPrBodyWithMetrics(bodyPath, root, env, exec)
+    metrics = buildPrBodyWithMetrics(bodyPath, root, env, exec);
     const createdPr = mustOk(
-      sh(exec, cwd, env, quiet, 'gh', [
-        'pr',
-        'create',
-        '--title',
+      sh(exec, cwd, env, quiet, "gh", [
+        "pr",
+        "create",
+        "--title",
         o.title,
-        '--body-file',
+        "--body-file",
         metrics.bodyPath,
       ]),
-      'gh pr create',
-    )
-    prUrl = createdPr.stdout.trim()
-    created = true
-    clearRunStarted(root, exec)
+      "gh pr create",
+    );
+    prUrl = createdPr.stdout.trim();
+    created = true;
+    clearRunStarted(root, exec);
   }
 
-  if (stryker.status === 'warn' && prUrl) {
-    const ref = prNumber ? String(prNumber) : prUrl
-    const cur = sh(exec, cwd, env, quiet, 'gh', ['pr', 'view', ref, '--json', 'body', '-q', '.body'])
-    const line = strykerWarningLine(stryker.attempts)
-    if (cur.code === 0 && !cur.stdout.includes('stryker: deferred to C-session')) {
-      const wp = resolveGitRelPath(root, 'agent-finish-stryker-body.md', exec)
-      fs.mkdirSync(path.dirname(wp), { recursive: true })
-      fs.writeFileSync(wp, `${cur.stdout.replace(/\s+$/, '')}\n\n${line}\n${stryker.detail}\n`)
-      sh(exec, cwd, env, quiet, 'gh', ['pr', 'edit', ref, '--body-file', wp])
+  if (stryker.status === "warn" && prUrl) {
+    const ref = prNumber ? String(prNumber) : prUrl;
+    const cur = sh(exec, cwd, env, quiet, "gh", [
+      "pr",
+      "view",
+      ref,
+      "--json",
+      "body",
+      "-q",
+      ".body",
+    ]);
+    const line = strykerWarningLine(stryker.attempts);
+    if (
+      cur.code === 0 &&
+      !cur.stdout.includes("stryker: deferred to C-session")
+    ) {
+      const wp = resolveGitRelPath(root, "agent-finish-stryker-body.md", exec);
+      fs.mkdirSync(path.dirname(wp), { recursive: true });
+      fs.writeFileSync(
+        wp,
+        `${cur.stdout.replace(/\s+$/, "")}\n\n${line}\n${stryker.detail}\n`,
+      );
+      sh(exec, cwd, env, quiet, "gh", ["pr", "edit", ref, "--body-file", wp]);
     }
   }
 
   return {
     ok: true,
-    stage: 'pr',
+    stage: "pr",
     pushAttempts: prior,
     branch,
     ahead,
@@ -2316,200 +2372,200 @@ export function cmdFinish(o, deps) {
     summary: created
       ? `${stampNote}PR created: ${prUrl}`
       : `${stampNote}PR updated (existing): ${prUrl}`,
-  }
+  };
 }
 
 export function cmdReviewBrief(o, deps) {
-  const { root, cwd, env, exec, quiet } = deps
-  let slug = o.change
+  const { root, cwd, env, exec, quiet } = deps;
+  let slug = o.change;
   if (!slug) {
     const br = mustOk(
-      sh(exec, cwd, env, quiet, 'git', ['branch', '--show-current']),
-      'git branch',
-    )
-    slug = slugFromBranch(br.stdout.trim())
+      sh(exec, cwd, env, quiet, "git", ["branch", "--show-current"]),
+      "git branch",
+    );
+    slug = slugFromBranch(br.stdout.trim());
   }
-  const changePath = path.join('openspec', 'changes', slug)
-  let rules = []
-  if (o['rules-json']) {
+  const changePath = path.join("openspec", "changes", slug);
+  let rules = [];
+  if (o["rules-json"]) {
     try {
-      rules = JSON.parse(o['rules-json'])
+      rules = JSON.parse(o["rules-json"]);
     } catch {
-      fail('--rules-json must be valid JSON')
+      fail("--rules-json must be valid JSON");
     }
   }
-  const designAbs = path.join(root, changePath, 'design.md')
-  let touchPaths = []
-  let touchNote = null
+  const designAbs = path.join(root, changePath, "design.md");
+  let touchPaths = [];
+  let touchNote = null;
   if (fs.existsSync(designAbs)) {
-    touchPaths = parseTouchSetPaths(fs.readFileSync(designAbs, 'utf8'))
+    touchPaths = parseTouchSetPaths(fs.readFileSync(designAbs, "utf8"));
   } else {
-    touchNote = 'design.md missing; treating all paths as outside touch-set'
+    touchNote = "design.md missing; treating all paths as outside touch-set";
   }
 
-  const base = o.base ?? 'HEAD'
-  if (base.startsWith('-'))
-    fail(`--base must not start with '-' (got ${JSON.stringify(base)})`)
+  const base = o.base ?? "HEAD";
+  if (base.startsWith("-"))
+    fail(`--base must not start with '-' (got ${JSON.stringify(base)})`);
 
   const mergeBaseR = mustOk(
-    sh(exec, cwd, env, quiet, 'git', ['merge-base', base, 'HEAD']),
-    'git merge-base',
-  )
-  const mergeBase = mergeBaseR.stdout.trim()
-  if (!mergeBase) fail('git merge-base produced empty output')
+    sh(exec, cwd, env, quiet, "git", ["merge-base", base, "HEAD"]),
+    "git merge-base",
+  );
+  const mergeBase = mergeBaseR.stdout.trim();
+  if (!mergeBase) fail("git merge-base produced empty output");
 
   const headStat = mustOk(
-    sh(exec, cwd, env, quiet, 'git', ['diff', mergeBase, '--stat']),
-    'git diff --stat',
-  )
+    sh(exec, cwd, env, quiet, "git", ["diff", mergeBase, "--stat"]),
+    "git diff --stat",
+  );
   const untrackedR = mustOk(
-    sh(exec, cwd, env, quiet, 'git', [
-      'ls-files',
-      '--others',
-      '--exclude-standard',
+    sh(exec, cwd, env, quiet, "git", [
+      "ls-files",
+      "--others",
+      "--exclude-standard",
     ]),
-    'git ls-files',
-  )
+    "git ls-files",
+  );
   const untracked = untrackedR.stdout
-    .split('\n')
+    .split("\n")
     .map((l) => l.trim())
-    .filter(Boolean)
+    .filter(Boolean);
 
-  const touchSet = new Set(touchPaths)
-  const changedTracked = []
+  const touchSet = new Set(touchPaths);
+  const changedTracked = [];
   const nameOnly = mustOk(
-    sh(exec, cwd, env, quiet, 'git', ['diff', mergeBase, '--name-only']),
-    'git diff --name-only',
-  )
+    sh(exec, cwd, env, quiet, "git", ["diff", mergeBase, "--name-only"]),
+    "git diff --name-only",
+  );
   for (const f of nameOnly.stdout
-    .split('\n')
+    .split("\n")
     .map((l) => l.trim())
     .filter(Boolean)) {
-    changedTracked.push(f)
+    changedTracked.push(f);
   }
-  const allChanged = [...new Set([...changedTracked, ...untracked])]
-  const inTouch = allChanged.filter((f) => touchSet.has(f))
-  const outside = allChanged.filter((f) => !touchSet.has(f))
+  const allChanged = [...new Set([...changedTracked, ...untracked])];
+  const inTouch = allChanged.filter((f) => touchSet.has(f));
+  const outside = allChanged.filter((f) => !touchSet.has(f));
 
-  const touchDiffParts = []
+  const touchDiffParts = [];
   if (touchPaths.length) {
     const td = mustOk(
-      sh(exec, cwd, env, quiet, 'git', [
-        'diff',
+      sh(exec, cwd, env, quiet, "git", [
+        "diff",
         mergeBase,
-        '--',
+        "--",
         ...touchPaths,
       ]),
-      'git diff touch-set',
-    )
-    const t = stripAnsi(td.stdout).trim()
-    if (t) touchDiffParts.push(t)
+      "git diff touch-set",
+    );
+    const t = stripAnsi(td.stdout).trim();
+    if (t) touchDiffParts.push(t);
   }
   for (const f of untracked) {
-    if (!touchSet.has(f)) continue
+    if (!touchSet.has(f)) continue;
     const d = mustOkDiffNoIndex(
-      sh(exec, cwd, env, quiet, 'git', [
-        'diff',
-        '--no-index',
-        '--',
-        '/dev/null',
+      sh(exec, cwd, env, quiet, "git", [
+        "diff",
+        "--no-index",
+        "--",
+        "/dev/null",
         f,
       ]),
       `git diff --no-index ${f}`,
-    )
-    const body = stripAnsi(d.stdout || d.stderr).trim()
-    if (body) touchDiffParts.push(body)
+    );
+    const body = stripAnsi(d.stdout || d.stderr).trim();
+    if (body) touchDiffParts.push(body);
   }
 
-  const outsideStatParts = []
+  const outsideStatParts = [];
   if (outside.length) {
-    const trackedOutside = outside.filter((f) => !untracked.includes(f))
+    const trackedOutside = outside.filter((f) => !untracked.includes(f));
     if (trackedOutside.length) {
       const od = mustOk(
-        sh(exec, cwd, env, quiet, 'git', [
-          'diff',
+        sh(exec, cwd, env, quiet, "git", [
+          "diff",
           mergeBase,
-          '--stat',
-          '--',
+          "--stat",
+          "--",
           ...trackedOutside,
         ]),
-        'git diff --stat outside touch-set',
-      )
-      const t = stripAnsi(od.stdout).trim()
-      if (t) outsideStatParts.push(t)
+        "git diff --stat outside touch-set",
+      );
+      const t = stripAnsi(od.stdout).trim();
+      if (t) outsideStatParts.push(t);
     }
-    const untrackedOutside = outside.filter((f) => untracked.includes(f))
+    const untrackedOutside = outside.filter((f) => untracked.includes(f));
     if (untrackedOutside.length) {
-      outsideStatParts.push(untrackedOutside.map((f) => `?? ${f}`).join('\n'))
+      outsideStatParts.push(untrackedOutside.map((f) => `?? ${f}`).join("\n"));
     }
   }
 
   const untrackedBlock = untracked.length
-    ? `Untracked:\n${untracked.map((f) => `?? ${f}`).join('\n')}`
-    : ''
+    ? `Untracked:\n${untracked.map((f) => `?? ${f}`).join("\n")}`
+    : "";
   const statBits = [stripAnsi(headStat.stdout).trim(), untrackedBlock]
     .filter(Boolean)
-    .join('\n')
+    .join("\n");
 
-  const checklistIds = readReviewChecklistIds(root)
+  const checklistIds = readReviewChecklistIds(root);
   const brief = {
     slug,
     changePath,
     rules,
     rulesNote: rules.length
       ? null
-      : 'pass --rules-json from openspec instructions',
+      : "pass --rules-json from openspec instructions",
     checklistIds,
     base,
     mergeBase,
-    diffStat: statBits || '(empty)',
+    diffStat: statBits || "(empty)",
     touchSetPaths: touchPaths,
     touchNote,
     inTouchSet: inTouch,
     outsideTouchSet: outside,
-    touchDiff: touchDiffParts.join('\n\n') || '(empty)',
+    touchDiff: touchDiffParts.join("\n\n") || "(empty)",
     outsideDiff: capOutsideTouchPreview(
-      outsideStatParts.join('\n') || '(empty)',
+      outsideStatParts.join("\n") || "(empty)",
     ),
     untracked,
-  }
+  };
   if (o.out) {
-    const outAbs = path.isAbsolute(o.out) ? o.out : path.join(cwd, o.out)
-    fs.mkdirSync(path.dirname(outAbs), { recursive: true })
-    fs.writeFileSync(outAbs, fmtBrief(brief) + '\n', 'utf8')
-    brief.outPath = outAbs
+    const outAbs = path.isAbsolute(o.out) ? o.out : path.join(cwd, o.out);
+    fs.mkdirSync(path.dirname(outAbs), { recursive: true });
+    fs.writeFileSync(outAbs, fmtBrief(brief) + "\n", "utf8");
+    brief.outPath = outAbs;
   }
-  return brief
+  return brief;
 }
 
 export function cmdInstructions(o, deps) {
-  const { root, cwd, env, exec, quiet } = deps
-  const artifact = o._[1]
-  if (!artifact) fail('usage: pnpm agent instructions <artifact> [--change S]')
-  let change = o.change
+  const { root, cwd, env, exec, quiet } = deps;
+  const artifact = o._[1];
+  if (!artifact) fail("usage: pnpm agent instructions <artifact> [--change S]");
+  let change = o.change;
   if (!change) {
     const br = mustOk(
-      sh(exec, cwd, env, quiet, 'git', ['branch', '--show-current']),
-      'git branch',
-    )
-    change = slugFromBranch(br.stdout.trim())
+      sh(exec, cwd, env, quiet, "git", ["branch", "--show-current"]),
+      "git branch",
+    );
+    change = slugFromBranch(br.stdout.trim());
   }
-  const instructions = loadArtifactInstructions(root, artifact, change)
-  return { ok: true, change, artifact, ...instructions }
+  const instructions = loadArtifactInstructions(root, artifact, change);
+  return { ok: true, change, artifact, ...instructions };
 }
 
 export function cmdArchive(o, deps) {
-  const { root, cwd, env, exec, quiet } = deps
-  let slug = o.change
+  const { root, cwd, env, exec, quiet } = deps;
+  let slug = o.change;
   if (!slug) {
     const br = mustOk(
-      sh(exec, cwd, env, quiet, 'git', ['branch', '--show-current']),
-      'git branch',
-    )
-    slug = slugFromBranch(br.stdout.trim())
+      sh(exec, cwd, env, quiet, "git", ["branch", "--show-current"]),
+      "git branch",
+    );
+    slug = slugFromBranch(br.stdout.trim());
   }
-  if (!slug) fail('usage: pnpm agent archive [--change S]')
-  const result = archiveOpenSpecChange(root, slug)
+  if (!slug) fail("usage: pnpm agent archive [--change S]");
+  const result = archiveOpenSpecChange(root, slug);
   return {
     ok: true,
     slug,
@@ -2519,37 +2575,37 @@ export function cmdArchive(o, deps) {
       : result.removed
         ? `removed openspec/changes/${slug}`
         : `no change dir for ${slug}`,
-  }
+  };
 }
 
 export function cmdStats(o, deps) {
-  const { cwd } = deps
-  const rel = o._[1]
-  if (!rel) fail('usage: pnpm agent stats <path>')
-  const filePath = path.isAbsolute(rel) ? rel : path.join(cwd, rel)
-  const rounds = loadStatsRounds(filePath)
-  const summary = summarizeStats(rounds)
+  const { cwd } = deps;
+  const rel = o._[1];
+  if (!rel) fail("usage: pnpm agent stats <path>");
+  const filePath = path.isAbsolute(rel) ? rel : path.join(cwd, rel);
+  const rounds = loadStatsRounds(filePath);
+  const summary = summarizeStats(rounds);
   return {
     ok: statsExitCode(summary) === 0,
     ...summary,
-  }
+  };
 }
 
 export function cmdSize(o, deps) {
-  const { root, cwd, env, exec, quiet } = deps
-  let slug = o.change
+  const { root, cwd, env, exec, quiet } = deps;
+  let slug = o.change;
   if (!slug) {
     const br = mustOk(
-      sh(exec, cwd, env, quiet, 'git', ['branch', '--show-current']),
-      'git branch',
-    )
-    slug = slugFromBranch(br.stdout.trim())
+      sh(exec, cwd, env, quiet, "git", ["branch", "--show-current"]),
+      "git branch",
+    );
+    slug = slugFromBranch(br.stdout.trim());
   }
   if (o.plan) {
-    const plan = checkPlanSize({ root, changeSlug: slug })
+    const plan = checkPlanSize({ root, changeSlug: slug });
     return {
       ok: true,
-      mode: 'plan',
+      mode: "plan",
       slug,
       total: plan.total,
       max: DIFF_SIZE_MAX,
@@ -2558,12 +2614,12 @@ export function cmdSize(o, deps) {
       summary:
         plan.reason ||
         `plan size ${plan.total} (target ≤1000, prefer ≤${DIFF_SIZE_MAX}; advisory)`,
-    }
+    };
   }
-  const size = computeDiffSize({ root, warnOnly: true })
+  const size = computeDiffSize({ root, warnOnly: true });
   return {
     ok: true,
-    mode: 'diff',
+    mode: "diff",
     slug,
     lines: size.lines,
     max: size.max,
@@ -2573,45 +2629,45 @@ export function cmdSize(o, deps) {
     summary:
       size.reason ||
       `${size.lines} changed lines (target ≤${size.warnAt}, prefer ≤${size.max}; advisory)`,
-  }
+  };
 }
 
 export function cmdManualQa(o, deps) {
-  const { root, cwd, env, exec, quiet } = deps
-  let slug = o.change
+  const { root, cwd, env, exec, quiet } = deps;
+  let slug = o.change;
   if (!slug) {
     try {
       const br = mustOk(
-        sh(exec, cwd, env, quiet, 'git', ['branch', '--show-current']),
-        'git branch',
-      )
-      slug = slugFromBranch(br.stdout.trim())
+        sh(exec, cwd, env, quiet, "git", ["branch", "--show-current"]),
+        "git branch",
+      );
+      slug = slugFromBranch(br.stdout.trim());
     } catch {
-      slug = undefined
+      slug = undefined;
     }
   }
-  const args = [path.join(root, 'scripts', 'manual-qa.mjs')]
-  if (slug) args.push('--change', slug)
-  if (o['base-url']) args.push('--base-url', o['base-url'])
-  const r = sh(exec, cwd, env, quiet, process.execPath, args)
-  const text = `${r.stdout}\n${r.stderr}`.trim()
+  const args = [path.join(root, "scripts", "manual-qa.mjs")];
+  if (slug) args.push("--change", slug);
+  if (o["base-url"]) args.push("--base-url", o["base-url"]);
+  const r = sh(exec, cwd, env, quiet, process.execPath, args);
+  const text = `${r.stdout}\n${r.stderr}`.trim();
   const lines = text
-    .split('\n')
+    .split("\n")
     .map((l) => l.trimEnd())
-    .filter((l) => l.trim().length > 0)
+    .filter((l) => l.trim().length > 0);
   return {
     ok: r.code === 0,
     slug,
     lines,
-    summary: lines.join('\n'),
-  }
+    summary: lines.join("\n"),
+  };
 }
 
 function fmtPreflight(r) {
-  const ruleList = r.instructions.rules
+  const ruleList = r.instructions.rules;
   const goalLines = Array.isArray(r.item.goal)
     ? r.item.goal.map((g) => `goal: ${g}`)
-    : [`goal: ${r.item.goal}`]
+    : [`goal: ${r.item.goal}`];
   const lines = [
     `ok: ${r.ok}`,
     `branch: ${r.branch}`,
@@ -2621,30 +2677,30 @@ function fmtPreflight(r) {
     `file: ${r.item.file}`,
     `milestone: ${r.item.milestone}`,
     ...goalLines,
-    `skips: ${r.skips.join(',')}`,
+    `skips: ${r.skips.join(",")}`,
     `touchSet: ${r.touchSet}`,
-    `checklistIds: ${r.checklistIds.join(',')}`,
+    `checklistIds: ${r.checklistIds.join(",")}`,
     `prepFastTrack: ${Boolean(r.prepFastTrack)}`,
     `instructions: rules=${ruleList.length} (use --json for template/rules)`,
-    `runCard.ready: ${(r.runCard?.ready ?? []).join(',') || '(none)'}`,
-  ]
-  if (r.staleWarning) lines.push(`staleWarning: ${r.staleWarning}`)
+    `runCard.ready: ${(r.runCard?.ready ?? []).join(",") || "(none)"}`,
+  ];
+  if (r.staleWarning) lines.push(`staleWarning: ${r.staleWarning}`);
   if (r.runCard?.artifacts) {
     for (const id of r.runCard.ready ?? []) {
-      const art = r.runCard.artifacts[id]
-      const n = Array.isArray(art?.rules) ? art.rules.length : 0
-      lines.push(`--- runCard artifact: ${id} (rules=${n}) ---`)
-      if (art?.template) lines.push(String(art.template).trimEnd())
+      const art = r.runCard.artifacts[id];
+      const n = Array.isArray(art?.rules) ? art.rules.length : 0;
+      lines.push(`--- runCard artifact: ${id} (rules=${n}) ---`);
+      if (art?.template) lines.push(String(art.template).trimEnd());
       if (Array.isArray(art?.rules)) {
-        for (const rule of art.rules) lines.push(`- ${rule}`)
+        for (const rule of art.rules) lines.push(`- ${rule}`);
       }
     }
   }
   if (r.runCard?.procedure) {
-    lines.push('--- apply/archive procedure ---')
-    lines.push(String(r.runCard.procedure).trimEnd())
+    lines.push("--- apply/archive procedure ---");
+    lines.push(String(r.runCard.procedure).trimEnd());
   }
-  return lines.join('\n')
+  return lines.join("\n");
 }
 
 function fmtInstructions(r) {
@@ -2652,14 +2708,14 @@ function fmtInstructions(r) {
     `ok: ${r.ok}`,
     `change: ${r.change}`,
     `artifact: ${r.artifact}`,
-    '--- template ---',
-    String(r.template ?? '').trimEnd(),
-    '--- rules ---',
-  ]
+    "--- template ---",
+    String(r.template ?? "").trimEnd(),
+    "--- rules ---",
+  ];
   if (Array.isArray(r.rules)) {
-    for (const rule of r.rules) lines.push(`- ${rule}`)
+    for (const rule of r.rules) lines.push(`- ${rule}`);
   }
-  return lines.join('\n')
+  return lines.join("\n");
 }
 
 function fmtStats(r) {
@@ -2669,19 +2725,19 @@ function fmtStats(r) {
     `peakContext: ${r.peakContext}`,
     `firstInput: ${r.firstInput}`,
     `modelCalls: ${r.modelCalls}`,
-  ]
+  ];
   if (r.estimated) {
     lines.push(
-      'note: token fields marked estimated use content chars/3.3 (no signatures/metadata)',
-    )
+      "note: token fields marked estimated use content chars/3.3 (no signatures/metadata)",
+    );
   }
   r.rounds.forEach((row, i) => {
-    const est = row.estimated ? ' estimated=true' : ''
+    const est = row.estimated ? " estimated=true" : "";
     lines.push(
       `round[${i}]: input=${row.input} output=${row.output} cacheRead=${row.cacheRead} modelCalls=${row.modelCalls} context=${row.context}${est}`,
-    )
-  })
-  return lines.join('\n')
+    );
+  });
+  return lines.join("\n");
 }
 
 function fmtFinish(r) {
@@ -2695,7 +2751,7 @@ function fmtFinish(r) {
     `created: ${r.created}`,
     `stampCurrent: ${r.stampCurrent}`,
     `summary: ${r.summary}`,
-  ].join('\n')
+  ].join("\n");
 }
 
 function fmtStampGreen(r) {
@@ -2704,49 +2760,45 @@ function fmtStampGreen(r) {
     `stamp: ${r.stamp}`,
     `path: ${r.path}`,
     `summary: ${r.summary}`,
-  ].join('\n')
+  ].join("\n");
 }
 function fmtFinalize(r) {
   if (!r.ok) {
-    const bits = [`FAIL ${r.stage || 'finalize'}`]
-    if (r.summary) bits.push(String(r.summary).trim())
-    return bits.join('\n')
+    const bits = [`FAIL ${r.stage || "finalize"}`];
+    if (r.summary) bits.push(String(r.summary).trim());
+    return bits.join("\n");
   }
-  return `ok: finalize ${r.slug}`
+  return `ok: finalize ${r.slug}`;
 }
 
-
-
 function fmtCiBrief(r) {
-  const lines = [
-    `ok: ${r.ok}`,
-    `pr: ${r.pr}`,
-    `summary: ${r.summary}`,
-  ]
+  const lines = [`ok: ${r.ok}`, `pr: ${r.pr}`, `summary: ${r.summary}`];
   for (const f of r.failures ?? []) {
     lines.push(
-      `FAIL ${f.name} (${f.conclusion})${f.url ? ` ${f.url}` : ''}`.trimEnd(),
-    )
+      `FAIL ${f.name} (${f.conclusion})${f.url ? ` ${f.url}` : ""}`.trimEnd(),
+    );
     for (const a of f.annotations ?? []) {
       const loc = a.path
-        ? `${a.path}${a.line != null ? `:${a.line}` : ''}`
-        : ''
-      lines.push(`  ${loc}${loc && a.message ? ' ' : ''}${a.message}`.trimEnd())
+        ? `${a.path}${a.line != null ? `:${a.line}` : ""}`
+        : "";
+      lines.push(
+        `  ${loc}${loc && a.message ? " " : ""}${a.message}`.trimEnd(),
+      );
     }
   }
-  return lines.join('\n')
+  return lines.join("\n");
 }
 
 function fmtCiWait(r) {
-  if (r.ok) return 'OK'
-  const lines = []
-  if (r.timedOut) lines.push(r.summary)
+  if (r.ok) return "OK";
+  const lines = [];
+  if (r.timedOut) lines.push(r.summary);
   for (const f of r.failures ?? []) {
-    lines.push(f.name)
-    if (f.logTail) lines.push(f.logTail)
+    lines.push(f.name);
+    if (f.logTail) lines.push(f.logTail);
   }
-  if (!lines.length) lines.push(r.summary || 'CI wait failed')
-  return lines.join('\n')
+  if (!lines.length) lines.push(r.summary || "CI wait failed");
+  return lines.join("\n");
 }
 
 function fmtBrief(r) {
@@ -2757,19 +2809,19 @@ function fmtBrief(r) {
     `mergeBase: ${r.mergeBase}`,
     `rules: ${JSON.stringify(r.rules)}`,
     `rulesNote: ${r.rulesNote}`,
-    `checklistIds: ${(r.checklistIds ?? []).join(',')}`,
-    '--- diff --stat ---',
+    `checklistIds: ${(r.checklistIds ?? []).join(",")}`,
+    "--- diff --stat ---",
     String(r.diffStat),
     `touchNote: ${r.touchNote}`,
-    `touchSet: ${r.touchSetPaths.join(', ')}`,
-    `inTouchSet: ${r.inTouchSet.join(', ')}`,
-    '--- touch-set diff ---',
+    `touchSet: ${r.touchSetPaths.join(", ")}`,
+    `inTouchSet: ${r.inTouchSet.join(", ")}`,
+    "--- touch-set diff ---",
     String(r.touchDiff),
-    '--- outsideTouchSet ---',
-    r.outsideTouchSet.join(', '),
-    '--- outsideTouchSet stat ---',
+    "--- outsideTouchSet ---",
+    r.outsideTouchSet.join(", "),
+    "--- outsideTouchSet stat ---",
     String(r.outsideDiff),
-  ].join('\n')
+  ].join("\n");
 }
 
 function fmtSize(r) {
@@ -2777,126 +2829,126 @@ function fmtSize(r) {
     `ok: ${r.ok}`,
     `mode: ${r.mode}`,
     `slug: ${r.slug}`,
-    r.mode === 'plan' ? `total: ${r.total}` : `lines: ${r.lines}`,
+    r.mode === "plan" ? `total: ${r.total}` : `lines: ${r.lines}`,
     `max: ${r.max}`,
     `summary: ${r.summary}`,
-  ].join('\n')
+  ].join("\n");
 }
 
 function fmtManualQa(r) {
-  return [`ok: ${r.ok}`, `slug: ${r.slug}`, ...r.lines].join('\n')
+  return [`ok: ${r.ok}`, `slug: ${r.slug}`, ...r.lines].join("\n");
 }
 
 export function run(argv, deps = {}) {
-  const cwd = deps.cwd ?? process.cwd()
-  const env = deps.env ?? process.env
-  const exec = deps.exec ?? defaultExec
-  let o
+  const cwd = deps.cwd ?? process.cwd();
+  const env = deps.env ?? process.env;
+  const exec = deps.exec ?? defaultExec;
+  let o;
   try {
-    o = parseArgs(argv)
-    const quiet = wantQuiet(o, env)
-    const [cmd] = o._
-    if (!cmd || cmd === 'help' || o.help)
-      return { code: cmd || o.help ? 0 : 2, out: HELP }
+    o = parseArgs(argv);
+    const quiet = wantQuiet(o, env);
+    const [cmd] = o._;
+    if (!cmd || cmd === "help" || o.help)
+      return { code: cmd || o.help ? 0 : 2, out: HELP };
     const allowsArg =
-      cmd === 'instructions' || cmd === 'stats' || cmd === 'finalize'
-    if (o._.length > 1 && !allowsArg) fail(`unexpected argument: ${o._[1]}`)
-    if (o._.length > 2) fail(`unexpected argument: ${o._[2]}`)
-    const root = path.resolve(cwd, o.root ?? '.')
-    const d = { ...deps, root, cwd, env, exec, quiet }
-    let r
-    let code = 0
+      cmd === "instructions" || cmd === "stats" || cmd === "finalize";
+    if (o._.length > 1 && !allowsArg) fail(`unexpected argument: ${o._[1]}`);
+    if (o._.length > 2) fail(`unexpected argument: ${o._[2]}`);
+    const root = path.resolve(cwd, o.root ?? ".");
+    const d = { ...deps, root, cwd, env, exec, quiet };
+    let r;
+    let code = 0;
     switch (cmd) {
-      case 'preflight':
-        r = cmdPreflight(o, d)
-        break
-      case 'finish':
-        r = cmdFinish(o, d)
-        code = r.ok ? 0 : 1
-        break
-      case 'stamp-green':
-        r = cmdStampGreen(o, d)
-        break
-      case 'finalize':
-        r = cmdFinalize(o, d)
-        code = r.ok ? 0 : 1
-        break
-      case 'ci-brief':
-        r = cmdCiBrief(o, d)
-        code = r.ok ? 0 : 1
-        break
-      case 'ci-wait':
-        r = cmdCiWait(o, d)
-        code = r.ok ? 0 : 1
-        break
-      case 'review-brief':
-        r = cmdReviewBrief(o, d)
-        break
-      case 'size':
-        r = cmdSize(o, d)
-        code = r.ok ? 0 : 1
-        break
-      case 'manual-qa':
-        r = cmdManualQa(o, d)
-        code = r.ok ? 0 : 1
-        break
-      case 'instructions':
-        r = cmdInstructions(o, d)
-        break
-      case 'archive':
-        r = cmdArchive(o, d)
-        break
-      case 'stats':
-        r = cmdStats(o, d)
-        code = statsExitCode(r)
-        break
+      case "preflight":
+        r = cmdPreflight(o, d);
+        break;
+      case "finish":
+        r = cmdFinish(o, d);
+        code = r.ok ? 0 : 1;
+        break;
+      case "stamp-green":
+        r = cmdStampGreen(o, d);
+        break;
+      case "finalize":
+        r = cmdFinalize(o, d);
+        code = r.ok ? 0 : 1;
+        break;
+      case "ci-brief":
+        r = cmdCiBrief(o, d);
+        code = r.ok ? 0 : 1;
+        break;
+      case "ci-wait":
+        r = cmdCiWait(o, d);
+        code = r.ok ? 0 : 1;
+        break;
+      case "review-brief":
+        r = cmdReviewBrief(o, d);
+        break;
+      case "size":
+        r = cmdSize(o, d);
+        code = r.ok ? 0 : 1;
+        break;
+      case "manual-qa":
+        r = cmdManualQa(o, d);
+        code = r.ok ? 0 : 1;
+        break;
+      case "instructions":
+        r = cmdInstructions(o, d);
+        break;
+      case "archive":
+        r = cmdArchive(o, d);
+        break;
+      case "stats":
+        r = cmdStats(o, d);
+        code = statsExitCode(r);
+        break;
       default:
-        fail(`unknown command: ${cmd}\n${HELP}`)
+        fail(`unknown command: ${cmd}\n${HELP}`);
     }
     const out = o.json
       ? JSON.stringify(r)
-      : cmd === 'preflight'
+      : cmd === "preflight"
         ? fmtPreflight(r)
-        : cmd === 'finish'
+        : cmd === "finish"
           ? fmtFinish(r)
-          : cmd === 'stamp-green'
+          : cmd === "stamp-green"
             ? fmtStampGreen(r)
-            : cmd === 'finalize'
+            : cmd === "finalize"
               ? fmtFinalize(r)
-              : cmd === 'ci-brief'
-              ? fmtCiBrief(r)
-              : cmd === 'ci-wait'
-                ? fmtCiWait(r)
-                : cmd === 'instructions'
-                  ? fmtInstructions(r)
-                  : cmd === 'stats'
-                    ? fmtStats(r)
-                    : cmd === 'size'
-                      ? fmtSize(r)
-                      : cmd === 'manual-qa'
-                        ? fmtManualQa(r)
-                        : cmd === 'archive'
-                          ? [
-                              `ok: ${r.ok}`,
-                              `slug: ${r.slug}`,
-                              `summary: ${r.summary}`,
-                            ].join('\n')
-                          : fmtBrief(r)
-    return { code, out }
+              : cmd === "ci-brief"
+                ? fmtCiBrief(r)
+                : cmd === "ci-wait"
+                  ? fmtCiWait(r)
+                  : cmd === "instructions"
+                    ? fmtInstructions(r)
+                    : cmd === "stats"
+                      ? fmtStats(r)
+                      : cmd === "size"
+                        ? fmtSize(r)
+                        : cmd === "manual-qa"
+                          ? fmtManualQa(r)
+                          : cmd === "archive"
+                            ? [
+                                `ok: ${r.ok}`,
+                                `slug: ${r.slug}`,
+                                `summary: ${r.summary}`,
+                              ].join("\n")
+                            : fmtBrief(r);
+    return { code, out };
   } catch (e) {
-    if (!(e instanceof AgentError)) throw e
+    if (!(e instanceof AgentError)) throw e;
     return {
       code: e.exitCode,
       err: o?.json
         ? JSON.stringify({ error: e.message })
         : `error: ${e.message}`,
-    }
+    };
   }
 }
 
 export function main(argv, io) {
-  const r = run(argv)
-  if (r.out) io.stdout.write(r.out + '\n')
-  if (r.err) io.stderr.write(r.err + '\n')
-  io.exitCode = r.code
+  const r = run(argv);
+  if (r.out) io.stdout.write(r.out + "\n");
+  if (r.err) io.stderr.write(r.err + "\n");
+  io.exitCode = r.code;
 }
