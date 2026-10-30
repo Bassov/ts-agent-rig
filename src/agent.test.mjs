@@ -4585,7 +4585,38 @@ describe('finalize', () => {
       fs.existsSync(path.join(root, 'openspec', 'changes', 'fin-lite')),
     ).toBe(false)
   })
+  it('does not run roadmap sync (index ticking is post-merge)', () => {
+    const root = tmpRoot(true)
+    fs.mkdirSync(path.join(root, 'openspec', 'changes', 'fin-nosync'), {
+      recursive: true,
+    })
+    fs.writeFileSync(
+      path.join(root, 'openspec', 'changes', 'fin-nosync', '.skip-specs'),
+      '',
+    )
+    const calls = []
+    const inner = fakeExec([
+      ...envOk,
+      ['git status --porcelain', { stdout: '' }],
+      ['pnpm -s roadmap done fin-nosync', { code: 0 }],
+      ['pnpm -s roadmap sync', { code: 1, stderr: 'sync must not run\n' }],
+      ['check:integrity', { code: 1, stderr: 'integrity stub\n' }],
+    ])
+    const exec = (file, args, opts) => {
+      calls.push(`${file} ${args.join(' ')}`)
+      return inner(file, args, opts)
+    }
+    const r = run(
+      ['finalize', '--change', 'fin-nosync', '--json', '--root', root],
+      { cwd: root, exec, env: {} },
+    )
+    const j = JSON.parse(r.out)
+    expect(j.stage).toBe('check:integrity')
+    expect(calls).toContain('pnpm -s roadmap done fin-nosync')
+    expect(calls.some((c) => c.includes('roadmap sync'))).toBe(false)
+  })
 })
+
 
 describe('isLiteTrack', () => {
   it('detects lite tag', () => {

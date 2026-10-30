@@ -174,7 +174,7 @@ const HELP = `usage: pnpm agent <cmd> [--root <repo>] [--json] [--quiet]
   preflight [--slug S] [--skip a,b]   env + roadmap next (+ branch from origin/main); run card
   finish --title T [--body-file F] thin push+PR (≤2/branch; no main merge; warn if stamp stale)
   stamp-green   write .cache/agent-green-tree (stage 11 after integrity+self-check)
-  finalize [slug] [--change S]   stages 10–11: delta-sync check → archive → roadmap done+sync → integrity → self-check → stamp-green
+  finalize [slug] [--change S]   stages 10–11: delta-sync check → archive → roadmap done (item file only) → integrity → self-check → stamp-green
   ci-brief [--pr N] [--watch]   thin CI failure brief (annotations; stage 13)
   ci-wait [--pr N] [--timeout MIN]   wait for PR checks (ignore codecov/patch + skipped; default 45m)
   review-brief [--change S] [--base REF] [--rules-json '[…]'] [--out FILE]   reviewer brief
@@ -1901,22 +1901,9 @@ export function cmdFinalize(o, deps) {
       }
     }
   }
-  const syncRoadmap = sh(exec, cwd, env, quiet, 'pnpm', [
-    '-s',
-    'roadmap',
-    'sync',
-  ])
-  if (syncRoadmap.code !== 0) {
-    return {
-      ok: false,
-      slug,
-      stage: 'roadmap-sync',
-      sync,
-      archived,
-      summary: tailOutput(syncRoadmap.stdout, syncRoadmap.stderr),
-    }
-  }
-
+  // No `roadmap sync` here: ticking the docs/roadmap.md index in every PR made
+  // parallel PRs conflict on adjacent checklist lines. The item file carries
+  // Status: done; `roadmap check` only warns until a post-merge sync/archive.
   const dirty = porcelain(exec, cwd, env, quiet)
   let committed = false
   if (dirty) {
