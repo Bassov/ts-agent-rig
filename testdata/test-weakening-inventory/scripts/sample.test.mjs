@@ -1,0 +1,5 @@
+test('scripts mjs 1', () => {})
+test('scripts mjs 2', () => {})
+test('scripts mjs 3', () => {})
+test('scripts mjs 4', () => {})
+test('scripts mjs 5', () => {})

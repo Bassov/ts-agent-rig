@@ -1,13 +1,8 @@
 import { execFileSync } from 'node:child_process'
-import {
-  copyFileSync,
-  mkdirSync,
-  mkdtempSync,
-  rmSync,
-  writeFileSync,
-} from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
 import {
   buildImportGraph,
@@ -37,22 +32,45 @@ afterEach(() => {
   }
 })
 
+// Resolved from this file, not process.cwd(): the CLI ships next to the test.
+const BURN_IN_CLI = fileURLToPath(
+  new URL('./e2e-burn-in-targets-cli.mjs', import.meta.url),
+)
+
+/** Minimal valid quality/gates.json, so the tmp repo needs no host copy. */
+const CLI_GATES = {
+  coverage: {
+    statements: 80,
+    branches: 80,
+    functions: 80,
+    lines: 80,
+    patch: 85,
+  },
+  stryker: {
+    thresholds: { high: 80, low: 60, break: 60 },
+    diffThresholds: { high: 90, low: 85, break: 85 },
+  },
+  mutation: { disableBudget: 0, temporaryExcludes: [] },
+  lighthouse: {
+    numberOfRuns: 1,
+    assertions: { 'performance-budget': 'error' },
+    budgets: [{ path: '/*', resourceSizes: [], resourceCounts: [] }],
+  },
+  playwright: { retries: 0, flakyRetries: 2 },
+  e2e: { burnInDefault: 10, flakySpecs: [] },
+}
+
 function runSpawnedCliBurnInTargets() {
-  const repoRoot = process.cwd()
   const tmpDir = initTmpRepo(tmpDirs, { prefix: 'burn-in-cli-' })
   mkdirSync(join(tmpDir, 'e2e'), { recursive: true })
   mkdirSync(join(tmpDir, 'quality'), { recursive: true })
-  // CLI loads e2e.flakySpecs via loadGates({ root: process.cwd() }).
-  copyFileSync(
-    join(repoRoot, 'quality/gates.json'),
-    join(tmpDir, 'quality/gates.json'),
-  )
+  // CLI loads e2e.flakySpecs via loadGates({ root: process.cwd() }) = tmpDir.
+  writeFileSync(join(tmpDir, 'quality/gates.json'), JSON.stringify(CLI_GATES))
   writeFileSync(
     join(tmpDir, 'e2e/burn-in-smoke.spec.ts'),
     "import { test } from '@playwright/test'\ntest('smoke', async () => {})\n",
   )
-  const cli = join(repoRoot, 'packages/ts-agent-rig/src/e2e-burn-in-targets-cli.mjs')
-  const out = execFileSync(process.execPath, [cli], {
+  const out = execFileSync(process.execPath, [BURN_IN_CLI], {
     encoding: 'utf8',
     cwd: tmpDir,
     env: {

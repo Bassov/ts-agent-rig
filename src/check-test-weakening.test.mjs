@@ -1,4 +1,3 @@
-import { resolveRepoRoot } from './resolve-repo-root.mjs'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -42,8 +41,6 @@ import {
   staticStringArg,
 } from './check-test-weakening.mjs'
 import ts from 'typescript'
-
-const REPO_ROOT = resolveRepoRoot()
 
 describe('parseTestFile', () => {
   it('detects skip/only/todo/fixme weakening markers', () => {
@@ -631,7 +628,10 @@ describe('compareItemCriteria', () => {
 })
 
 describe('real repo inventory', () => {
-  const FIXTURE_ROOT = path.join(REPO_ROOT, 'testdata/test-weakening-inventory')
+  // Package-owned fixture resolved from this file: no host repo, no cwd.
+  const FIXTURE_ROOT = fileURLToPath(
+    new URL('../testdata/test-weakening-inventory', import.meta.url),
+  )
 
   /**
    * Walk a miniature tree that mirrors tracked path kinds (src/scripts/e2e
