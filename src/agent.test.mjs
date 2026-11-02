@@ -353,6 +353,14 @@ describe("parsers", () => {
     expect(PREP_APPLY_ARCHIVE_PROCEDURE).toContain("skip_specs:true");
     expect(APPLY_ARCHIVE_PROCEDURE).toContain("docs/agent-loop.md");
     expect(PREP_APPLY_ARCHIVE_PROCEDURE).toContain("docs/agent-loop.md");
+    for (const p of [
+      APPLY_ARCHIVE_PROCEDURE,
+      PREP_APPLY_ARCHIVE_PROCEDURE,
+      LITE_APPLY_PROCEDURE,
+    ]) {
+      expect(p).toContain('"## Must-read"');
+      expect(p.split("\n").length).toBeLessThanOrEqual(10);
+    }
   });
 
   it("isPrepFastTrack false when roadmap introduces missing src/<capability>/", () => {
@@ -806,15 +814,61 @@ describe("preflight", () => {
     expect(r.out).toContain("ok: true");
     expect(r.out).toContain("slug: demo-item");
     expect(r.out).toContain(
-      "instructions: rules=1 (use --json for template/rules)",
+      "instructions: rules=1 (pnpm agent instructions <artifact>; --verbose prints them)",
     );
     expect(r.out).toContain("runCard.ready: proposal");
     expect(r.out).toContain("--- runCard artifact: proposal (rules=1) ---");
     expect(r.out).toContain("## Proposal");
-    expect(r.out).toContain("- Keep proposals under 80 words.");
+    expect(r.out).toContain("rules: pnpm -s agent instructions proposal");
+    expect(r.out).not.toContain("- Keep proposals under 80 words.");
     expect(r.out).toContain("prepFastTrack: false");
     expect(r.out).toContain("--- apply/archive procedure ---");
     expect(r.out).toContain("reviewer subagents");
+  });
+
+  it("text mode is compact by default and full with --verbose", () => {
+    const root = tmpRoot();
+    const longGoal = "x".repeat(400);
+    const item = {
+      slug: "demo-item",
+      tag: "prep",
+      title: "t",
+      file: "f",
+      milestone: "M",
+      goal: longGoal,
+      body: "BODY",
+    };
+    const steps = () =>
+      fakeExec([
+        ...envOk,
+        ["git status --porcelain", { stdout: "" }],
+        ["git fetch origin", { code: 0 }],
+        ["git switch main", { code: 0 }],
+        ["git pull --ff-only", { code: 0 }],
+        ["gh pr list", { stdout: "feat/aa\nfix/bb\n" }],
+        ["git branch -r", { stdout: "" }],
+        ["pnpm -s roadmap next --json", { stdout: JSON.stringify(item) }],
+        ["git switch -c feat/demo-item", { code: 0 }],
+      ]);
+    const compact = run(["preflight", "--root", root], {
+      cwd: root,
+      exec: steps(),
+      env: {},
+    });
+    expect(compact.code, compact.err).toBe(0);
+    expect(compact.out).toContain(`goal: ${"x".repeat(159)}…\n`);
+    expect(compact.out).toContain("skips: 2 claimed (--verbose lists)");
+    expect(compact.out.split("\n").length).toBeLessThanOrEqual(40);
+    const full = run(["preflight", "--root", root, "--verbose"], {
+      cwd: root,
+      exec: steps(),
+      env: {},
+    });
+    expect(full.code, full.err).toBe(0);
+    expect(full.out).toContain(`goal: ${longGoal}\n`);
+    expect(full.out).toContain("skips: aa,bb");
+    expect(full.out).toContain("- Keep proposals under 80 words.");
+    expect(full.out).not.toContain("rules: pnpm -s agent instructions");
   });
 
   it("text mode prints (none) for empty rules and string goal", () => {
@@ -869,7 +923,7 @@ describe("preflight", () => {
     expect(r.out).toContain("touchSet: openspec/changes/demo-item/design.md");
     expect(r.out).toContain("checklistIds: ");
     expect(r.out).toContain(
-      "instructions: rules=0 (use --json for template/rules)",
+      "instructions: rules=0 (pnpm agent instructions <artifact>; --verbose prints them)",
     );
   });
 

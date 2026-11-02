@@ -58,7 +58,7 @@ export function tailOutput(stdout, stderr, n = 60) {
   return lines.slice(-n).join("\n");
 }
 
-const BOOL = new Set(["json", "quiet", "help", "plan", "watch"]);
+const BOOL = new Set(["json", "quiet", "help", "plan", "watch", "verbose"]);
 const VALUE = new Set([
   "root",
   "change",
@@ -77,22 +77,22 @@ const VALUE = new Set([
 /** ≤10-line apply/archive procedure embedded in the preflight run card. */
 export const APPLY_ARCHIVE_PROCEDURE = `\
 Apply/archive (≤10):
-1. Follow host docs/agent-loop.md for orchestration (stages, A/B/C, commit rules, stamp, thin finish).
+1. Follow host docs/agent-loop.md "## Must-read" (stages, A/B/C, commits, stamp, thin finish); other headings by range on demand.
 2. Artifact how: openspec/config.yaml rules + operations; reviewers = host reviewer subagents (see docs/agent-loop.md).
-Explore: grep ≤30; offset/limit if >400 lines; no re-read; no TodoWrite in -p.
+Explore: grep ≤30; ranged reads ≤60 lines; cap command output; no re-read; no TodoWrite in -p.
 Task shape: reviewer skill set + brief file path only.`;
 
 /** Prep/contingency fast-track when Tag: prep|contingency + concrete Scope/Done when. */
 export const PREP_APPLY_ARCHIVE_PROCEDURE = `\
 Apply/archive prep fast-track (≤10):
-1. Follow host docs/agent-loop.md for orchestration (stages, A/B/C, commit rules, stamp, thin finish).
+1. Follow host docs/agent-loop.md "## Must-read" (stages, A/B/C, commits, stamp, thin finish); other headings by range on demand.
 2. Brief proposal.md + tasks.md; skip design.md unless arch/security; skip_specs:true if no src/ capability behavior change (touch .skip-specs / .skip-design). Skip openspec-planning-reviewer.
 3. Else execute the same loop SoT (implement → quality phases → archive → finish).
-Explore: grep ≤30; offset/limit if >400; no re-read; no TodoWrite in -p.
+Explore: grep ≤30; ranged reads ≤60 lines; cap command output; no re-read; no TodoWrite in -p.
 Task shape: skill set + brief path only.`;
 export const LITE_APPLY_PROCEDURE = `\
 Lite track (≤10):
-1. Follow host docs/agent-loop.md lite routing (no openspec/changes, no planning reviewer, no archive).
+1. Follow host docs/agent-loop.md "## Must-read" lite routing (no openspec/changes, no planning reviewer, no archive).
 2. Roadmap item + PR body are the plan; still run A, B (changed specs), ui-review/smoke when UI, implementation reviewer, roadmap done.
 3. Escalate to normal OpenSpec track if apply grows or touches domain behavior.
 `;
@@ -169,7 +169,7 @@ export function parseArgs(argv) {
 }
 
 const HELP = `usage: pnpm agent <cmd> [--root <repo>] [--json] [--quiet]
-  preflight [--slug S] [--skip a,b]   env + roadmap next (+ branch from origin/main); run card
+  preflight [--slug S] [--skip a,b] [--verbose]   env + roadmap next (+ branch from origin/main); compact run card (--verbose: full rules/skips/goal)
   finish --title T [--body-file F] thin push+PR (≤2/branch; no main merge; warn if stamp stale; src/ diff runs stryker:diff, 2-run cap then PR-body warning)
   stamp-green   write .cache/agent-green-tree (stage 11 after integrity+self-check)
   finalize [slug] [--change S]   stages 10–11: delta-sync check → archive → roadmap done (item file only) → integrity → self-check → stamp-green
@@ -2663,11 +2663,29 @@ export function cmdManualQa(o, deps) {
   };
 }
 
-function fmtPreflight(r) {
+/** Compact run-card cap for long free-text fields (goal lines). */
+const PREFLIGHT_FIELD_MAX = 160;
+
+function clip(s, max) {
+  const t = String(s);
+  return t.length > max ? `${t.slice(0, max - 1)}…` : t;
+}
+
+/**
+ * Text run card. Default is compact (≤40 lines for unattended workers):
+ * goal clipped, skips counted, artifact rules replaced by an
+ * `agent instructions <id>` pointer. `--verbose` prints everything.
+ */
+function fmtPreflight(r, verbose = false) {
   const ruleList = r.instructions.rules;
-  const goalLines = Array.isArray(r.item.goal)
-    ? r.item.goal.map((g) => `goal: ${g}`)
-    : [`goal: ${r.item.goal}`];
+  const goals = Array.isArray(r.item.goal) ? r.item.goal : [r.item.goal];
+  const goalLines = goals.map(
+    (g) => `goal: ${verbose ? g : clip(g, PREFLIGHT_FIELD_MAX)}`,
+  );
+  const skips =
+    verbose || r.skips.length === 0
+      ? r.skips.join(",")
+      : `${r.skips.length} claimed (--verbose lists)`;
   const lines = [
     `ok: ${r.ok}`,
     `branch: ${r.branch}`,
@@ -2677,11 +2695,11 @@ function fmtPreflight(r) {
     `file: ${r.item.file}`,
     `milestone: ${r.item.milestone}`,
     ...goalLines,
-    `skips: ${r.skips.join(",")}`,
+    `skips: ${skips}`,
     `touchSet: ${r.touchSet}`,
     `checklistIds: ${r.checklistIds.join(",")}`,
     `prepFastTrack: ${Boolean(r.prepFastTrack)}`,
-    `instructions: rules=${ruleList.length} (use --json for template/rules)`,
+    `instructions: rules=${ruleList.length} (pnpm agent instructions <artifact>; --verbose prints them)`,
     `runCard.ready: ${(r.runCard?.ready ?? []).join(",") || "(none)"}`,
   ];
   if (r.staleWarning) lines.push(`staleWarning: ${r.staleWarning}`);
@@ -2691,8 +2709,10 @@ function fmtPreflight(r) {
       const n = Array.isArray(art?.rules) ? art.rules.length : 0;
       lines.push(`--- runCard artifact: ${id} (rules=${n}) ---`);
       if (art?.template) lines.push(String(art.template).trimEnd());
-      if (Array.isArray(art?.rules)) {
+      if (verbose && Array.isArray(art?.rules)) {
         for (const rule of art.rules) lines.push(`- ${rule}`);
+      } else if (n > 0) {
+        lines.push(`rules: pnpm -s agent instructions ${id}`);
       }
     }
   }
@@ -2908,7 +2928,7 @@ export function run(argv, deps = {}) {
     const out = o.json
       ? JSON.stringify(r)
       : cmd === "preflight"
-        ? fmtPreflight(r)
+        ? fmtPreflight(r, Boolean(o.verbose))
         : cmd === "finish"
           ? fmtFinish(r)
           : cmd === "stamp-green"
