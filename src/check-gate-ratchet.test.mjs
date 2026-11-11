@@ -1279,8 +1279,24 @@ jobs:
         : after.slice(runAt, runAt + 1 + nextStep)
     expect(runBlock).not.toMatch(/\$\{\{\s*github\.head_ref/)
     expect(runBlock).not.toMatch(/\$\{\{\s*github\.event\.pull_request\./)
-    expect(runBlock).toContain('--base-ref "$PR_POLICY_BASE_SHA"')
+    expect(runBlock).toContain(
+      'MB=$(git merge-base "$PR_POLICY_BASE_SHA" refs/gate-ratchet/head)',
+    )
+    expect(runBlock).toContain('--base-ref "$MB"')
+    expect(runBlock).not.toContain('--base-ref "$PR_POLICY_BASE_SHA"')
     expect(runBlock).not.toContain('--branch')
+  })
+
+  it('Gate ratchet workflow fetches full head history for merge-base', () => {
+    const yml = fs.readFileSync(
+      path.join(REPO_ROOT, '.github/workflows/pr-policy.yml'),
+      'utf8',
+    )
+    const stepAt = yml.indexOf('name: Fetch head as data')
+    expect(stepAt).toBeGreaterThanOrEqual(0)
+    const step = yml.slice(stepAt, yml.indexOf('\n      - name:', stepAt))
+    expect(step).toContain('refs/gate-ratchet/head')
+    expect(step).not.toContain('--depth')
   })
 
   it('comment-only exit 1 does not satisfy failOnNeeds', () => {
@@ -3151,6 +3167,47 @@ export default config
     ).toBe(1)
   })
 
+  it('merge-base base ref: spec added on base after fork is not test-file-deleted', () => {
+    const repo = initTmpRepo(tmpDirs, {
+      prefix: 'ratchet-fork-',
+      seedFiles: baseFiles({
+        'src/old.test.ts': `test('old', () => {})\n`,
+        'src/old.ts': `export const old = 1\n`,
+      }),
+    })
+    const fork = String(gitExec(['rev-parse', 'HEAD'], repo)).trim()
+    fs.writeFileSync(
+      path.join(repo, 'src/main-only.test.ts'),
+      `test('main', () => {})\n`,
+    )
+    gitExec(['add', '.'], repo, { stdio: 'ignore' })
+    gitExec(['commit', '-m', 'main adds spec'], repo, { stdio: 'ignore' })
+    const baseTip = String(gitExec(['rev-parse', 'HEAD'], repo)).trim()
+    gitExec(['checkout', '-b', 'pr', fork], repo, { stdio: 'ignore' })
+    fs.rmSync(path.join(repo, 'src/old.test.ts'))
+    gitExec(['add', '.'], repo, { stdio: 'ignore' })
+    gitExec(['commit', '-m', 'pr deletes spec'], repo, { stdio: 'ignore' })
+    const head = String(gitExec(['rev-parse', 'HEAD'], repo)).trim()
+    const mb = String(gitExec(['merge-base', baseTip, head], repo)).trim()
+    expect(mb).toBe(fork)
+
+    const headFiles = readTreeFromGitRef(repo, head)
+    const deleted = (/** @type {string} */ baseRef) =>
+      compareGateTrees(readTreeFromGitRef(repo, baseRef), headFiles, {
+        prBody: '',
+        branch: 'fix/demo',
+      })
+        .violations.filter((v) => v.ruleId === 'test-file-deleted')
+        .map((v) => v.message)
+        .join('\n')
+
+    const viaMergeBase = deleted(mb)
+    expect(viaMergeBase).toContain('src/old.test.ts')
+    expect(viaMergeBase).not.toContain('src/main-only.test.ts')
+    // Root cause: diffing the base tip blames the PR for main's new spec.
+    expect(deleted(baseTip)).toContain('src/main-only.test.ts')
+  })
+
   it('resolvePrPolicyBaseRef default git path hits spawnSync', () => {
     expect(
       resolvePrPolicyBaseRef({
@@ -3609,7 +3666,10 @@ export default {
 
   function loadPr126FixtureTree(side) {
     const raw = fs.readFileSync(
-      path.join(REPO_ROOT, 'packages/ts-agent-rig/src/fixtures/pr-126-scripts-glob.json'),
+      path.join(
+        REPO_ROOT,
+        'packages/ts-agent-rig/src/fixtures/pr-126-scripts-glob.json',
+      ),
       'utf8',
     )
     const payload = JSON.parse(raw)
