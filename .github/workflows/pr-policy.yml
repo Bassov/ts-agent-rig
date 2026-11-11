@@ -36,18 +36,22 @@ jobs:
           pnpm-version: ${{ inputs.pnpm-version }}
           install: 'true'
 
+      # Full head history (no --depth): merge-base needs the fork point.
       - name: Fetch head as data (works for forks)
         run: |
-          git fetch --no-tags --depth=1 origin \
+          git fetch --no-tags origin \
             pull/${{ github.event.pull_request.number }}/head:refs/gate-ratchet/head
 
+      # Compare the fork point, not the base tip: files main added after the
+      # fork are absent from head but were never deleted by the PR.
       - name: Gate ratchet (base script vs head tree)
         env:
           PR_POLICY_BODY: ${{ github.event.pull_request.body }}
           PR_POLICY_BRANCH: ${{ github.head_ref }}
           PR_POLICY_BASE_SHA: ${{ github.event.pull_request.base.sha }}
-        run: >
-          pnpm exec ts-rig-gate pr-policy
-          --base-ref "$PR_POLICY_BASE_SHA"
-          --head-ref refs/gate-ratchet/head
-          --pr-body-env PR_POLICY_BODY
+        run: |
+          MB=$(git merge-base "$PR_POLICY_BASE_SHA" refs/gate-ratchet/head)
+          pnpm exec ts-rig-gate pr-policy \
+            --base-ref "$MB" \
+            --head-ref refs/gate-ratchet/head \
+            --pr-body-env PR_POLICY_BODY
