@@ -28,6 +28,28 @@ Polls the PR for the current branch (`gh`) until checks settle (default timeout 
 
 Local `ts-rig-gate patch-coverage` / `check-patch-coverage` always scores against the branch base = merge-base with `origin/main` (same as Codecov). The phase-commit `STRYKER_DIFF_BASE` applies only to `e2e:changed` and `stryker:diff`, not patch coverage.
 
+## `agent finalize`
+
+Stages: dirty-tree check → delta-spec sync check → the item's own tick
+evidence → archive → `roadmap done` → commit → `check:integrity` →
+`quality:self-check` → green-tree stamp.
+
+- **Resumable:** passed check stages are cached in the git dir
+  (`agent-finalize-stages.json`), keyed by HEAD, `origin/main`, the ratchet
+  base / branch and the local Stryker report. A rerun on the same HEAD runs
+  only the failed and unrun stages. Any new commit reruns all of them.
+- **One actionable line:** a failure prints
+  `FAIL <stage>: <first cause> (+N more) — fix, commit, then rerun: …`, then
+  the failing rows only and `stages:` with per-stage time / `cached` / `timeout`.
+- **Bounded:** each check stage is capped at 10 min
+  (`AGENT_FINALIZE_STAGE_TIMEOUT_MS`). A hung stage fails as `timeout`.
+- **Scoped self-check:** `evidence` reads the item's change plus the change
+  dirs the branch diff touches, never leftovers on main. `disables` counts
+  NoCoverage mutants in changed files only, as `file:line mutator`.
+- Check stages get `GATE_RATCHET_BASE` = `merge-base HEAD origin/main` and
+  `PR_POLICY_BRANCH` = the current branch, the same as the pre-push hook.
+  Explicit env values win.
+
 ## Programmatic
 
 ```js

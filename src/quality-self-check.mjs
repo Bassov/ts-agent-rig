@@ -12,6 +12,7 @@ import { readReviewChecklistIds } from './review-checklist.mjs'
 import { runPrPolicyCheck } from './check-gate-ratchet.mjs'
 import { computeDiffSize, checkPlanSize } from './check-diff-size.mjs'
 import { stripGitKeys } from './strip-git-env.mjs'
+import { formatMutationMissLine, readMutationMisses } from './mutation-miss.mjs'
 
 const ROOT = resolveRepoRoot()
 export const REVIEWER_ONLY_IDS = Object.freeze([
@@ -107,34 +108,86 @@ export function checkRealInput(opts = {}) {
   return { ok: problems.length === 0, problems }
 }
 
-export function checkStrykerReportHints(root) {
-  const candidates = [
-    path.join(root, 'reports', 'mutation', 'mutation.json'),
-    path.join(root, '.cache', 'stryker', 'mutation.json'),
-  ]
-  const found = candidates.find((c) => fs.existsSync(c))
-  if (!found) return { ok: true, skipped: true, problems: [] }
+/**
+ * NoCoverage mutants in the local Stryker report, scoped to `changedFiles`
+ * (null → whole report). A report whose NoCoverage mutants all sit outside
+ * the branch diff is stale (another branch / run) and is skipped.
+ * @param {string} root
+ * @param {string[] | null} [changedFiles]
+ */
+export function checkStrykerReportHints(root, changedFiles = null) {
+  const { report, all, misses } = readMutationMisses(root, {
+    statuses: ['NoCoverage'],
+    changedFiles,
+  })
+  if (!report) return { ok: true, skipped: true, problems: [] }
+  if (all > 0 && misses.length === 0)
+    return {
+      ok: true,
+      skipped: true,
+      stale: true,
+      problems: [],
+    }
+  const problems = misses.length
+    ? [formatMutationMissLine(misses, 'pnpm stryker:diff')]
+    : []
+  return { ok: problems.length === 0, skipped: false, problems }
+}
+
+/**
+ * Tick-evidence problems for the given tasks.md paths (missing files skipped).
+ * @param {string} root
+ * @param {string[]} tasksPaths absolute paths
+ */
+export function checkTasksEvidence(root, tasksPaths) {
   /** @type {string[]} */
   const problems = []
-  try {
-    const raw = JSON.parse(fs.readFileSync(found, 'utf8'))
-    const scan = (obj) => {
-      if (!obj || typeof obj !== 'object') return
-      for (const m of Array.isArray(obj.mutants) ? obj.mutants : []) {
-        if (m?.status === 'NoCoverage') {
-          problems.push(`NoCoverage mutant in ${found}`)
-          return
-        }
-      }
-      for (const v of Object.values(obj)) {
-        if (v && typeof v === 'object') scan(v)
+  let sawTasks = false
+  for (const tPath of tasksPaths) {
+    if (!fs.existsSync(tPath)) continue
+    sawTasks = true
+    for (const tick of parseTickedTasks(fs.readFileSync(tPath, 'utf8'))) {
+      if (!hasTickEvidence(tick.evidence)) {
+        problems.push(
+          `${path.relative(root, tPath)}:${tick.line} no test/link/commit evidence`,
+        )
       }
     }
-    scan(raw)
-  } catch {
-    /* ignore */
   }
-  return { ok: problems.length === 0, skipped: false, problems }
+  return { sawTasks, problems }
+}
+
+/**
+ * tasks.md paths this branch owns: the slug's change plus every change dir
+ * the branch diff touches. Change dirs left on main by other items are not
+ * this branch's evidence. `changedFiles` null (diff unavailable) → all dirs.
+ * @param {string} root
+ * @param {string | undefined} slug
+ * @param {string[] | null} changedFiles
+ */
+export function evidenceTasksPaths(root, slug, changedFiles) {
+  const changesDir = path.join(root, 'openspec', 'changes')
+  /** @type {string[]} */
+  const out = []
+  const add = (name) => {
+    const t = path.join(changesDir, name, 'tasks.md')
+    if (!out.includes(t)) out.push(t)
+  }
+  if (slug) add(slug)
+  if (!fs.existsSync(changesDir)) return out
+  const touched = changedFiles
+    ? new Set(
+        changedFiles
+          .map((f) => /^openspec\/changes\/([^/]+)\//.exec(f)?.[1])
+          .filter(Boolean),
+      )
+    : null
+  for (const ent of fs.readdirSync(changesDir, { withFileTypes: true })) {
+    if (!ent.isDirectory() || ent.name === 'archive') continue
+    if (touched && !touched.has(ent.name)) continue
+    add(ent.name)
+  }
+  return out
 }
 
 function defaultGit(args, cwd) {
@@ -186,16 +239,23 @@ export function runQualitySelfCheck(opts = {}) {
   rows.gates =
     gateCode === 0
       ? { status: 'pass' }
-      : { status: 'fail', detail: errs.join('; ') || 'pr-policy' }
+      : {
+          status: 'fail',
+          detail:
+            errs.join('; ') ||
+            'pr-policy (Gate ratchet lines below; rerun: pnpm exec ts-rig-gate pr-policy)',
+        }
 
   const nameOnly = git(['diff', '--name-only', 'origin/main...HEAD'], root)
-  const changedFiles =
+  // null = diff unavailable: scoped checks fall back to the whole tree.
+  const scopeFiles =
     (nameOnly.status ?? 1) === 0
       ? nameOnly.stdout
           .split('\n')
           .map((l) => l.trim())
           .filter(Boolean)
-      : []
+      : null
+  const changedFiles = scopeFiles ?? []
 
   let slug = opts.changeSlug
   if (!slug) {
@@ -232,40 +292,10 @@ export function runQualitySelfCheck(opts = {}) {
     rows.size = { status: 'pass', detail }
   }
 
-  /** @type {string[]} */
-  const tasksPaths = []
-  if (slug)
-    tasksPaths.push(
-      path.join(
-        root,
-        'openspec',
-        'changes',
-        /** @type {string} */ (slug),
-        'tasks.md',
-      ),
-    )
-  const changesDir = path.join(root, 'openspec', 'changes')
-  if (fs.existsSync(changesDir)) {
-    for (const ent of fs.readdirSync(changesDir, { withFileTypes: true })) {
-      if (!ent.isDirectory() || ent.name === 'archive') continue
-      const t = path.join(changesDir, ent.name, 'tasks.md')
-      if (fs.existsSync(t) && !tasksPaths.includes(t)) tasksPaths.push(t)
-    }
-  }
-  /** @type {string[]} */
-  const evidenceProblems = []
-  let sawTasks = false
-  for (const tPath of tasksPaths) {
-    if (!fs.existsSync(tPath)) continue
-    sawTasks = true
-    for (const tick of parseTickedTasks(fs.readFileSync(tPath, 'utf8'))) {
-      if (!hasTickEvidence(tick.evidence)) {
-        evidenceProblems.push(
-          `${path.relative(root, tPath)}:${tick.line} no test/link/commit evidence`,
-        )
-      }
-    }
-  }
+  const { sawTasks, problems: evidenceProblems } = checkTasksEvidence(
+    root,
+    evidenceTasksPaths(root, slug, scopeFiles),
+  )
   if (!sawTasks) rows.evidence = { status: 'n.a.', detail: 'no tasks.md' }
   else if (evidenceProblems.length)
     rows.evidence = {
@@ -279,8 +309,13 @@ export function runQualitySelfCheck(opts = {}) {
     ? { status: 'pass' }
     : { status: 'fail', detail: real.problems.join('; ') }
 
-  const dis = checkStrykerReportHints(root)
-  if (dis.skipped)
+  const dis = checkStrykerReportHints(root, scopeFiles)
+  if (dis.stale)
+    rows.disables = {
+      status: 'n.a.',
+      detail: 'stryker report has NoCoverage only outside this diff (stale)',
+    }
+  else if (dis.skipped)
     rows.disables = { status: 'n.a.', detail: 'no local stryker report' }
   else if (!dis.ok)
     rows.disables = { status: 'fail', detail: dis.problems.join('; ') }

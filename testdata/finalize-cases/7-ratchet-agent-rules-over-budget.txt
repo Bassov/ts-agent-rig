@@ -1,0 +1,13 @@
+scope: n.a. — reviewer
+size: pass — 59 lines
+gates: fail — pr-policy
+exclusions: n.a. — reviewer
+disables: n.a. — no local stryker report
+tests-first: n.a. — reviewer
+evidence: fail — openspec/changes/design-r3-book-cover/tasks.md:7 no test/link/commit evidence; openspec/changes/fix-flaky-node-tests/tasks.md:6 no test/link/commit evidence; openspec/changes/fix-flaky-node-tests/tasks.md:7 no test/link/commit evidence; openspec/changes/library-json-schema/tasks.md:3 no test/link/commit evidence; openspec/changes/library-json-schema/tasks.md:4 no test/link/commit evidence
+roadmap-follow-ups: n.a. — reviewer
+english: n.a. — reviewer
+real-input: pass
+
+Gate ratchet: FAIL
+- [agent-rules-over-budget] agentRules.budgets missing entry for .claude/agents/code-scout.md

@@ -1,0 +1,3 @@
+error: delta-spec sync check failed:
+openspec/specs/publish/spec.md missing Requirement: Guided setup discovery
+openspec/specs/publish/spec.md missing Requirement: Resumable guided provisioning

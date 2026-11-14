@@ -1,0 +1,11 @@
+Gate ratchet: OK (head not weaker than base)
+scope: n.a. — reviewer
+size: pass — 3007 lines — no proposal.md (skip plan size)
+gates: pass
+exclusions: n.a. — reviewer
+disables: fail — NoCoverage mutant in /work/photobooks-wt-printer-presets/reports/mutation/mutation.json
+tests-first: n.a. — reviewer
+evidence: fail — openspec/changes/design-r3-book-cover/tasks.md:7 no test/link/commit evidence; openspec/changes/fix-flaky-node-tests/tasks.md:6 no test/link/commit evidence; openspec/changes/fix-flaky-node-tests/tasks.md:7 no test/link/commit evidence; openspec/changes/library-json-schema/tasks.md:3 no test/link/commit evidence; openspec/changes/library-json-schema/tasks.md:4 no test/link/commit evidence
+roadmap-follow-ups: n.a. — reviewer
+english: n.a. — reviewer
+real-input: pass
