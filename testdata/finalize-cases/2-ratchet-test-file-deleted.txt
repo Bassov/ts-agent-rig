@@ -1,0 +1,17 @@
+scope: n.a. — reviewer
+size: pass — 1736 lines — no proposal.md (skip plan size)
+gates: fail — pr-policy
+exclusions: n.a. — reviewer
+disables: pass
+tests-first: n.a. — reviewer
+evidence: fail — openspec/changes/design-r3-book-cover/tasks.md:7 no test/link/commit evidence; openspec/changes/fix-flaky-node-tests/tasks.md:6 no test/link/commit evidence; openspec/changes/fix-flaky-node-tests/tasks.md:7 no test/link/commit evidence; openspec/changes/library-json-schema/tasks.md:3 no test/link/commit evidence; openspec/changes/library-json-schema/tasks.md:4 no test/link/commit evidence
+roadmap-follow-ups: n.a. — reviewer
+english: n.a. — reviewer
+real-input: pass
+
+Gate ratchet: FAIL
+- [test-file-deleted] test file deleted without companion source: e2e/live-captions.spec.ts
+- [test-file-deleted] test file deleted without companion source: src/editor/InspectorControls.test.tsx
+- [test-file-deleted] test file deleted without companion source: src/render/SpreadView.textMemo.test.tsx
+- [test-file-deleted] test file deleted without companion source: src/site/SiteBookPage.embedded.test.tsx
+- [item-criteria-loosened] roadmap item criteria loosened: docs/roadmap/P2/live-captions.md

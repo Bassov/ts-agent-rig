@@ -1,6 +1,7 @@
 // Agent pipeline CLI library: composite preflight / finish / review-brief.
 // Entry: scripts/agent-cli.mjs (`pnpm agent`). Zero deps, Node 22, ESM.
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
@@ -22,6 +23,12 @@ import {
   openSpecChangeStatus,
 } from "./openspec-native.mjs";
 import { CiBriefError, runCiBrief } from "./ci-brief.mjs";
+import {
+  findMutationReport,
+  formatMutationMissLine,
+  readMutationMisses,
+} from "./mutation-miss.mjs";
+import { checkTasksEvidence } from "./quality-self-check.mjs";
 import { runCiWait } from "./ci-wait.mjs";
 
 const nodeRequire = createRequire(import.meta.url);
@@ -172,7 +179,7 @@ const HELP = `usage: pnpm agent <cmd> [--root <repo>] [--json] [--quiet]
   preflight [--slug S] [--skip a,b] [--verbose]   env + roadmap next (+ branch from origin/main); compact run card (--verbose: full rules/skips/goal)
   finish --title T [--body-file F] thin push+PR (≤2/branch; no main merge; warn if stamp stale; src/ diff runs stryker:diff, 2-run cap then PR-body warning)
   stamp-green   write .cache/agent-green-tree (stage 11 after integrity+self-check)
-  finalize [slug] [--change S]   stages 10–11: delta-sync check → archive → roadmap done (item file only) → integrity → self-check → stamp-green
+  finalize [slug] [--change S]   stages 10–11: delta-sync check → own tick evidence → archive → roadmap done (item file only) → integrity → self-check → stamp-green; a rerun on the same HEAD skips passed stages; a failure prints one FAIL line with the rerun command
   ci-brief [--pr N] [--watch]   thin CI failure brief (annotations; stage 13)
   ci-wait [--pr N] [--timeout MIN]   wait for PR checks (ignore codecov/patch + skipped; default 45m)
   review-brief [--change S] [--base REF] [--rules-json '[…]'] [--out FILE]   reviewer brief
@@ -234,6 +241,13 @@ export function defaultExec(file, args, opts = {}) {
     const code = typeof e.status === "number" ? e.status : 1;
     const stdout = String(e.stdout ?? "");
     const stderr = String(e.stderr ?? "");
+    if (e.code === "ETIMEDOUT")
+      return {
+        code: 124,
+        stdout,
+        stderr: `${stderr}\n(timed out after ${Math.round((opts.timeout ?? 0) / 1000)}s)`,
+        timedOut: true,
+      };
     if (!stdout && !stderr && e.message)
       return { code, stdout: "", stderr: String(e.message) };
     return { code, stdout, stderr };
@@ -1884,7 +1898,10 @@ export function assertDeltaSpecsSynced(root, slug) {
     }
   }
   if (problems.length) {
-    fail(`delta-spec sync check failed:\n${problems.join("\n")}`, 1);
+    fail(
+      `delta-spec sync check failed: ${problems.length} requirement(s) not in openspec/specs — copy the ADDED/MODIFIED requirement blocks from openspec/changes/${slug}/specs/<cap>/spec.md into openspec/specs/<cap>/spec.md (drop REMOVED ones), commit, then rerun: pnpm -s agent finalize ${slug}\n${problems.join("\n")}`,
+      1,
+    );
   }
   return { ok: true, note: `synced ${caps.length} capability delta(s)` };
 }
@@ -1906,6 +1923,140 @@ function resolveFinalizeSlug(o, deps) {
   return slug;
 }
 
+/** Finalize check stages after the archive commit, in order (host scripts). */
+export const FINALIZE_CHECK_STAGES = Object.freeze([
+  ["check:integrity", ["-s", "check:integrity"]],
+  ["quality:self-check", ["-s", "quality:self-check"]],
+]);
+const FINALIZE_STATE_FILE = "agent-finalize-stages.json";
+/**
+ * Per-stage spawn cap. Measured stages take seconds (whole finalize median
+ * 18 s, max 75 s); a hung stage fails as `timeout` under the 15+ min Bash
+ * timeouts workers pass instead of killing the tool call with no output.
+ */
+export const FINALIZE_STAGE_TIMEOUT_MS = 10 * 60_000;
+
+export function finalizeStageTimeoutMs(env) {
+  const n = Number.parseInt(
+    String(env?.AGENT_FINALIZE_STAGE_TIMEOUT_MS ?? ""),
+    10,
+  );
+  return Number.isFinite(n) && n > 0 ? n : FINALIZE_STAGE_TIMEOUT_MS;
+}
+
+/**
+ * Env for the check stages: the same ratchet base the pre-push hook uses
+ * (fork point, so tests main added after the fork are not "deleted") and the
+ * real branch (pr-policy otherwise guesses the item slug from touched files).
+ * Explicit env values win.
+ */
+export function finalizeStageEnv(deps, branch) {
+  const { cwd, env, exec, quiet } = deps;
+  const out = { ...env };
+  if (!out.GATE_RATCHET_BASE) {
+    const mb = sh(exec, cwd, env, quiet, "git", [
+      "merge-base",
+      "HEAD",
+      "origin/main",
+    ]);
+    if (mb.code === 0 && mb.stdout.trim())
+      out.GATE_RATCHET_BASE = mb.stdout.trim();
+  }
+  if (!out.PR_POLICY_BRANCH && branch) out.PR_POLICY_BRANCH = branch;
+  return out;
+}
+
+/**
+ * Cache key over every input the check stages read: HEAD, origin/main, the
+ * ratchet base / branch and the local Stryker report. Any change reruns all
+ * stages; null (no HEAD) disables the cache.
+ */
+export function finalizeInputsKey(deps, slug, stageEnv) {
+  const { root, cwd, env, exec, quiet } = deps;
+  const head = sh(exec, cwd, env, quiet, "git", ["rev-parse", "HEAD"]);
+  if (head.code !== 0 || !head.stdout.trim()) return null;
+  const base = sh(exec, cwd, env, quiet, "git", [
+    "rev-parse",
+    "--verify",
+    "-q",
+    "origin/main",
+  ]);
+  const report = findMutationReport(root);
+  let reportStat = "none";
+  if (report) {
+    const s = fs.statSync(report);
+    reportStat = `${s.size}:${s.mtimeMs}`;
+  }
+  return createHash("sha256")
+    .update(
+      [
+        slug,
+        head.stdout.trim(),
+        base.code === 0 ? base.stdout.trim() : "",
+        stageEnv.GATE_RATCHET_BASE ?? "",
+        stageEnv.PR_POLICY_BRANCH ?? "",
+        reportStat,
+      ].join("\0"),
+      "utf8",
+    )
+    .digest("hex");
+}
+
+export function readFinalizeState(root, exec = defaultExec) {
+  const p = gitPath(root, FINALIZE_STATE_FILE, exec);
+  if (!fs.existsSync(p)) return {};
+  try {
+    return JSON.parse(fs.readFileSync(p, "utf8"));
+  } catch {
+    return {};
+  }
+}
+
+export function writeFinalizeState(root, state, exec = defaultExec) {
+  const p = gitPath(root, FINALIZE_STATE_FILE, exec);
+  fs.mkdirSync(path.dirname(p), { recursive: true });
+  fs.writeFileSync(p, JSON.stringify(state) + "\n");
+}
+
+/**
+ * One actionable line for a failed check stage: the first failing cause, how
+ * many more, and the commands to rerun (finalize skips passed stages).
+ */
+export function finalizeHint(stage, summary, slug, timedOut = false) {
+  const stageArgs = FINALIZE_CHECK_STAGES.find(([n]) => n === stage)?.[1];
+  const only = stageArgs ? ` (this stage only: pnpm ${stageArgs.join(" ")})` : "";
+  const rerun = `then rerun: pnpm -s agent finalize ${slug}${only}`;
+  if (timedOut) return `${stage} timed out — find the hung step, ${rerun}`;
+  const lines = String(summary ?? "")
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean);
+  const rows = lines
+    .map((l) => /^([\w-]+): fail(?: — (.*))?$/.exec(l))
+    .filter(Boolean);
+  if (rows.length) {
+    const [, id, detail] = rows[0];
+    const violations = lines.filter((l) => /^- \[[\w-]+\]/.test(l));
+    const cause =
+      id === "gates" && violations.length
+        ? `gates: ${violations[0].slice(2)}${violations.length > 1 ? ` (+${violations.length - 1} more)` : ""}`
+        : `${id}: ${detail ?? "fail"}`;
+    const more =
+      rows.length > 1
+        ? ` (+ failing: ${rows
+            .slice(1)
+            .map((m) => m[1])
+            .join(", ")})`
+        : "";
+    return `${cause}${more} — fix, commit, ${rerun}`;
+  }
+  const first =
+    lines.find((l) => /\b(fail|error)\b|✗|✖/i.test(l)) ??
+    lines.at(-1) ??
+    "(no output)";
+  return `${first} — fix, commit, ${rerun}`;
+}
+
 /**
  * Collapse stages 10–11: delta-sync check → archive → roadmap done+sync →
  * commit if needed → check:integrity → quality:self-check → stamp-green.
@@ -1917,9 +2068,33 @@ export function cmdFinalize(o, deps) {
   const slug = resolveFinalizeSlug(o, deps);
 
   const dirty0 = porcelain(exec, cwd, env, quiet);
-  if (dirty0) fail(`working tree not clean (commit first):\n${dirty0}`, 1);
+  if (dirty0) {
+    const paths = dirty0.split("\n").map((l) => l.trim().slice(2).trim());
+    fail(
+      `working tree not clean: ${paths.length} path(s) (${paths.slice(0, 3).join(", ")}${paths.length > 3 ? ", …" : ""}) — commit them, then rerun: pnpm -s agent finalize ${slug}\n${dirty0}`,
+      1,
+    );
+  }
 
   const sync = assertDeltaSpecsSynced(root, slug);
+
+  // The change dir is deleted by archive below, so its tick evidence is
+  // checked here; quality:self-check then only sees change dirs this branch
+  // still carries (never leftovers other items left on main).
+  const evidence = checkTasksEvidence(root, [
+    path.join(root, "openspec", "changes", slug, "tasks.md"),
+  ]);
+  if (evidence.problems.length) {
+    const n = evidence.problems.length;
+    return {
+      ok: false,
+      slug,
+      stage: "evidence",
+      sync,
+      hint: `${evidence.problems[0]}${n > 1 ? ` (+${n - 1} more)` : ""} — name a test file, commit sha or link in each tick, commit, then rerun: pnpm -s agent finalize ${slug}`,
+      summary: evidence.problems.join("\n"),
+    };
+  }
 
   const archived = archiveOpenSpecChange(root, slug);
 
@@ -2001,37 +2176,44 @@ export function cmdFinalize(o, deps) {
     committed = true;
   }
 
-  const integrity = sh(exec, cwd, env, quiet, "pnpm", [
-    "-s",
-    "check:integrity",
-  ]);
-  if (integrity.code !== 0) {
-    return {
-      ok: false,
-      slug,
-      stage: "check:integrity",
-      sync,
-      archived,
-      committed,
-      summary: tailOutput(integrity.stdout, integrity.stderr),
-    };
+  const branch = sh(exec, cwd, env, quiet, "git", [
+    "branch",
+    "--show-current",
+  ]).stdout.trim();
+  const stageEnv = finalizeStageEnv(deps, branch);
+  const key = finalizeInputsKey(deps, slug, stageEnv);
+  const prev = readFinalizeState(root, exec);
+  const passed = key && prev.key === key ? { ...prev.passed } : {};
+  const timeout = finalizeStageTimeoutMs(env);
+  const stages = [];
+  for (const [name, args] of FINALIZE_CHECK_STAGES) {
+    if (passed[name]) {
+      stages.push({ name, status: "cached", ms: 0 });
+      continue;
+    }
+    const t0 = Date.now();
+    const r = sh(exec, cwd, stageEnv, quiet, "pnpm", args, { timeout });
+    const ms = Date.now() - t0;
+    if (r.code !== 0) {
+      stages.push({ name, status: r.timedOut ? "timeout" : "fail", ms });
+      if (key) writeFinalizeState(root, { key, passed }, exec);
+      const summary = tailOutput(r.stdout, r.stderr);
+      return {
+        ok: false,
+        slug,
+        stage: name,
+        sync,
+        archived,
+        committed,
+        stages,
+        hint: finalizeHint(name, summary, slug, !!r.timedOut),
+        summary,
+      };
+    }
+    passed[name] = { ms };
+    stages.push({ name, status: "pass", ms });
   }
-
-  const selfCheck = sh(exec, cwd, env, quiet, "pnpm", [
-    "-s",
-    "quality:self-check",
-  ]);
-  if (selfCheck.code !== 0) {
-    return {
-      ok: false,
-      slug,
-      stage: "quality:self-check",
-      sync,
-      archived,
-      committed,
-      summary: tailOutput(selfCheck.stdout, selfCheck.stderr),
-    };
-  }
+  if (key) writeFinalizeState(root, { key, passed }, exec);
 
   const stamp = writeGreenTreeStamp(root, { exec, cwd, env });
   return {
@@ -2040,6 +2222,7 @@ export function cmdFinalize(o, deps) {
     sync,
     archived,
     committed,
+    stages,
     stamp,
     path: greenTreeStampPath(root),
     summary: `finalize ${slug} ok`,
@@ -2170,7 +2353,16 @@ export function finishStrykerGate(deps, branch) {
     { ...state, [branch]: { attempts, passSha: null } },
     exec,
   );
-  const detail = tailOutput(r.stdout, r.stderr, 25);
+  const { misses } = readMutationMisses(root, {
+    statuses: ["Survived", "NoCoverage"],
+    changedFiles: changed.filter(Boolean),
+  });
+  const detail = [
+    formatMutationMissLine(misses, "pnpm stryker:diff"),
+    tailOutput(r.stdout, r.stderr, 25),
+  ]
+    .filter(Boolean)
+    .join("\n");
   return {
     status: attempts >= STRYKER_FINISH_CAP ? "warn" : "block",
     attempts,
@@ -2782,13 +2974,36 @@ function fmtStampGreen(r) {
     `summary: ${r.summary}`,
   ].join("\n");
 }
-function fmtFinalize(r) {
+function fmtStages(stages) {
+  return (stages ?? [])
+    .map(
+      (s) =>
+        `${s.name} ${s.status === "pass" ? `${(s.ms / 1000).toFixed(1)}s` : s.status}`,
+    )
+    .join(", ");
+}
+
+/** Self-check rows that passed or are n.a. are noise under a failure. */
+function finalizeFailDetail(stage, summary) {
+  const text = String(summary).trim();
+  if (stage !== "quality:self-check") return text;
+  const keep = text
+    .split("\n")
+    .filter((l) => /: fail\b|^- \[|^Gate ratchet: FAIL/.test(l.trim()));
+  return keep.length ? keep.join("\n") : text;
+}
+
+export function fmtFinalize(r) {
   if (!r.ok) {
-    const bits = [`FAIL ${r.stage || "finalize"}`];
-    if (r.summary) bits.push(String(r.summary).trim());
+    const bits = [
+      `FAIL ${r.stage || "finalize"}${r.hint ? `: ${r.hint}` : ""}`,
+    ];
+    if (r.summary) bits.push(finalizeFailDetail(r.stage, r.summary));
+    if (r.stages?.length) bits.push(`stages: ${fmtStages(r.stages)}`);
     return bits.join("\n");
   }
-  return `ok: finalize ${r.slug}`;
+  const stages = fmtStages(r.stages);
+  return `ok: finalize ${r.slug}${stages ? ` (${stages})` : ""}`;
 }
 
 function fmtCiBrief(r) {

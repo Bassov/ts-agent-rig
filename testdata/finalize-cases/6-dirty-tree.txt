@@ -1,0 +1,2 @@
+error: working tree not clean (commit first):
+M openspec/specs/publish/spec.md

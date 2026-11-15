@@ -276,7 +276,7 @@ export function computePatchCoverage(opts = {}) {
 export function formatPatchCoverageFailure(result) {
   const pct = result.percent == null ? 'n/a' : result.percent.toFixed(1)
   const bits = result.uncovered.map((u) => `${u.file}:${u.lines.join(',')}`)
-  return `patch coverage ${pct}% (${bits.length ? bits.join('; ') : result.reason || 'uncovered'})`
+  return `patch coverage ${pct}% (${bits.length ? bits.join('; ') : result.reason || 'uncovered'}) — cover these lines, then rerun: pnpm exec ts-rig-gate patch-coverage`
 }
 
 function branchHasOwnerApproval(root = ROOT) {

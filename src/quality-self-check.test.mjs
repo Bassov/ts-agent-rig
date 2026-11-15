@@ -97,3 +97,107 @@ describe('quality-self-check', () => {
     expect(lines).toContain('pr-body: n.a. — unhandled')
   })
 })
+
+/**
+ * Root causes of testdata/finalize-cases/1 and 3: change dirs other items
+ * left on main and a stale local Stryker report failed every finalize.
+ */
+describe('quality-self-check scope (finalize replay cases 1 and 3)', () => {
+  const NO_EVIDENCE = '- [x] 1.1 vague tick\n'
+
+  function hostWithLeftovers() {
+    const root = tmp()
+    for (const name of [
+      'design-r3-book-cover',
+      'fix-flaky-node-tests',
+      'library-json-schema',
+    ]) {
+      const d = path.join(root, 'openspec', 'changes', name)
+      fs.mkdirSync(d, { recursive: true })
+      fs.writeFileSync(path.join(d, 'tasks.md'), NO_EVIDENCE)
+    }
+    return root
+  }
+
+  function writeReport(root, files) {
+    const p = path.join(root, 'reports', 'mutation', 'mutation.json')
+    fs.mkdirSync(path.dirname(p), { recursive: true })
+    fs.writeFileSync(p, JSON.stringify({ files }))
+  }
+
+  function selfCheck(root, changed, branch = 'fix/printer-presets') {
+    const lines = []
+    const code = runQualitySelfCheck({
+      root,
+      git: (args) => {
+        if (args.includes('--name-only'))
+          return changed == null
+            ? { status: 128, stdout: '', stderr: 'no origin/main' }
+            : { status: 0, stdout: changed.join('\n'), stderr: '' }
+        if (args[0] === 'branch')
+          return { status: 0, stdout: `${branch}\n`, stderr: '' }
+        return { status: 0, stdout: '', stderr: '' }
+      },
+      runPrPolicy: () => 0,
+      write: (s) => lines.push(...String(s).trimEnd().split('\n')),
+    })
+    const row = (id) => lines.find((l) => l.startsWith(`${id}:`))
+    return { code, row }
+  }
+
+  const noCoverage = (line) => ({
+    status: 'NoCoverage',
+    mutatorName: 'ConditionalExpression',
+    location: { start: { line } },
+  })
+
+  it('leftover change dirs and a stale report outside the diff no longer fail', () => {
+    const root = hostWithLeftovers()
+    writeReport(root, { 'src/other-branch.ts': { mutants: [noCoverage(5)] } })
+    const r = selfCheck(root, ['src/printer/presets.ts'])
+    expect(r.code).toBe(0)
+    expect(r.row('evidence')).toBe('evidence: n.a. — no tasks.md')
+    expect(r.row('disables')).toBe(
+      'disables: n.a. — stryker report has NoCoverage only outside this diff (stale)',
+    )
+  })
+
+  it('still fails on change dirs and NoCoverage mutants the branch touches', () => {
+    const root = hostWithLeftovers()
+    const mine = path.join(root, 'openspec', 'changes', 'printer-presets')
+    fs.mkdirSync(mine, { recursive: true })
+    fs.writeFileSync(path.join(mine, 'tasks.md'), NO_EVIDENCE)
+    const other = path.join(root, 'openspec', 'changes', 'touched-sibling')
+    fs.mkdirSync(other, { recursive: true })
+    fs.writeFileSync(path.join(other, 'tasks.md'), NO_EVIDENCE)
+    writeReport(root, {
+      [path.join(root, 'src/printer/presets.ts')]: {
+        mutants: [noCoverage(12)],
+      },
+    })
+    const r = selfCheck(root, [
+      'src/printer/presets.ts',
+      'openspec/changes/touched-sibling/proposal.md',
+    ])
+    expect(r.code).toBe(1)
+    expect(r.row('evidence')).toBe(
+      'evidence: fail — openspec/changes/printer-presets/tasks.md:1 no test/link/commit evidence; openspec/changes/touched-sibling/tasks.md:1 no test/link/commit evidence',
+    )
+    expect(r.row('disables')).toBe(
+      'disables: fail — NoCoverage src/printer/presets.ts:12 ConditionalExpression — add a test that kills it, then rerun: pnpm stryker:diff',
+    )
+  })
+
+  it('without a branch diff it falls back to checking every change dir and the whole report', () => {
+    const root = hostWithLeftovers()
+    writeReport(root, { 'src/other-branch.ts': { mutants: [noCoverage(5)] } })
+    const r = selfCheck(root, null, 'main')
+    expect(r.code).toBe(1)
+    expect(r.row('evidence')).toMatch(
+      /design-r3-book-cover\/tasks\.md:1 .*fix-flaky-node-tests\/tasks\.md:1 .*library-json-schema\/tasks\.md:1 /,
+    )
+    expect(r.row('disables')).toMatch(
+      /^disables: fail — NoCoverage src\/other-branch\.ts:5 /,
+    )
+  })
+})
