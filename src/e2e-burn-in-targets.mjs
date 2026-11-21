@@ -388,8 +388,7 @@ export function main(env = process.env, io = {}) {
   try {
     const changed = collectChangedPaths(base, io)
     const targets = selectBurnInTargets(changed, { env, ...io }).filter(
-      (path) =>
-      isFile(path),
+      (path) => isFile(path),
     )
     if (targets.length === 0) return 0
     write(`${targets.join('\n')}\n`)
