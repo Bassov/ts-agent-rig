@@ -7,13 +7,18 @@ import { afterEach, describe, expect, it } from 'vitest'
 import {
   buildImportGraph,
   collectChangedPaths,
+  DEFAULT_BURN_IN_BUDGET,
+  estimateSpecTests,
   extractRelativeImports,
   gitLines,
   isE2eSpec,
   isE2eSupportFile,
   listE2eSourceFiles,
   main,
+  resolveBudget,
   resolveE2eImport,
+  resolveRepeats,
+  sampleTransitiveSpecs,
   selectBurnInTargets,
   transitiveImports,
 } from './e2e-burn-in-targets.mjs'
@@ -184,6 +189,241 @@ describe('listE2eSourceFiles', () => {
         },
       }),
     ).toEqual([])
+  })
+})
+
+/** e2e tree where every spec imports one shared fixture. */
+function sharedFixtureRepo(specCount, testsPerSpec = 1) {
+  const files = { 'e2e/fixtures/shared.ts': `export const s = 1\n` }
+  const body = Array.from(
+    { length: testsPerSpec },
+    (_, i) => `test('t${String(i)}', () => {})\n`,
+  ).join('')
+  for (let i = 0; i < specCount; i += 1) {
+    const name = `e2e/s${String(i).padStart(4, '0')}.spec.ts`
+    files[name] = `import { s } from './fixtures/shared'\n${body}`
+  }
+  return files
+}
+
+function repoIo(files, extra = {}) {
+  return {
+    listSources: () => Object.keys(files).sort(),
+    readFile: (path) => {
+      if (!(path in files)) throw new Error('missing')
+      return files[path]
+    },
+    exists: (path) => path in files,
+    flakyPaths: [],
+    repeats: 10,
+    env: {},
+    log: () => {},
+    ...extra,
+  }
+}
+
+describe('estimateSpecTests', () => {
+  it('counts titled test/it calls and modifiers, never below 1', () => {
+    const src = [
+      `test('a', () => {})`,
+      `  test.only("b", () => {})`,
+      `test.fixme(\`c\`, () => {})`,
+      `it.skip('d', () => {})`,
+      `test.describe('group', () => {})`,
+      `test.step('s', () => {})`,
+      `const x = test('inline', () => {})`,
+    ].join('\n')
+    expect(estimateSpecTests(src)).toBe(4)
+    expect(estimateSpecTests('export {}')).toBe(1)
+  })
+})
+
+describe('resolveBudget / resolveRepeats', () => {
+  it('defaults to 900 and accepts a positive integer override', () => {
+    expect(resolveBudget({})).toBe(DEFAULT_BURN_IN_BUDGET)
+    expect(DEFAULT_BURN_IN_BUDGET).toBe(900)
+    expect(resolveBudget({ E2E_BURN_IN_BUDGET: '' })).toBe(900)
+    expect(resolveBudget({ E2E_BURN_IN_BUDGET: '120' })).toBe(120)
+  })
+
+  it('rejects a non-positive or non-integer budget', () => {
+    for (const raw of ['0', '-5', '1.5', 'x']) {
+      expect(() => resolveBudget({ E2E_BURN_IN_BUDGET: raw })).toThrow(
+        `E2E_BURN_IN_BUDGET must be a positive integer, got ${raw}`,
+      )
+    }
+  })
+
+  it('uses injected repeats, else the e2e-burn-in-count resolution', () => {
+    expect(resolveRepeats({ repeats: 3 })).toBe(3)
+    expect(resolveRepeats({ repeats: () => 4 })).toBe(4)
+    expect(resolveRepeats({ env: { E2E_BURN_IN: '7' } })).toBe(7)
+    expect(resolveRepeats({ env: { E2E_BURN_IN: 'bad' } })).toBe(10)
+  })
+})
+
+describe('sampleTransitiveSpecs', () => {
+  const specs = ['e2e/a.spec.ts', 'e2e/b.spec.ts', 'e2e/c.spec.ts']
+
+  it('takes everything that fits, sorted', () => {
+    expect(
+      sampleTransitiveSpecs([...specs].reverse(), {
+        seed: 'x',
+        budgetTests: 3,
+        estimate: () => 1,
+      }),
+    ).toEqual(specs)
+  })
+
+  it('keeps one spec when nothing fits, and an empty list stays empty', () => {
+    const one = sampleTransitiveSpecs(specs, {
+      seed: 'x',
+      budgetTests: 0,
+      estimate: () => 5,
+    })
+    expect(one).toHaveLength(1)
+    expect(specs).toContain(one[0])
+    expect(
+      sampleTransitiveSpecs([], { seed: 'x', budgetTests: 0, estimate: () => 1 }),
+    ).toEqual([])
+  })
+
+  it('skips a spec that does not fit and fills with smaller ones', () => {
+    const cost = { 'e2e/a.spec.ts': 1, 'e2e/b.spec.ts': 1, 'e2e/c.spec.ts': 1 }
+    const picked = sampleTransitiveSpecs(specs, {
+      seed: 'x',
+      budgetTests: 2,
+      estimate: (path) => cost[path],
+    })
+    expect(picked).toHaveLength(2)
+    const big = sampleTransitiveSpecs(specs, {
+      seed: 'x',
+      budgetTests: 2,
+      estimate: (path) => (path === picked[0] ? 3 : 1),
+    })
+    expect(big).not.toContain(picked[0])
+    expect(big).toHaveLength(2)
+  })
+
+  it('is deterministic per seed and the order depends on the seed', () => {
+    const many = Array.from(
+      { length: 40 },
+      (_, i) => `e2e/s${String(i)}.spec.ts`,
+    )
+    const pick = (seed, list) =>
+      sampleTransitiveSpecs(list, { seed, budgetTests: 5, estimate: () => 1 })
+    expect(pick('fixture-a', many)).toEqual(pick('fixture-a', [...many].reverse()))
+    expect(pick('fixture-a', many)).not.toEqual(pick('fixture-b', many))
+  })
+})
+
+describe('selectBurnInTargets budget', () => {
+  it('only changed specs: unchanged list, no sampling, no log', () => {
+    const files = sharedFixtureRepo(300)
+    const logs = []
+    expect(
+      selectBurnInTargets(
+        ['e2e/s0002.spec.ts', 'e2e/s0001.spec.ts'],
+        repoIo(files, { log: (t) => logs.push(t), repeats: 50 }),
+      ),
+    ).toEqual(['e2e/s0001.spec.ts', 'e2e/s0002.spec.ts'])
+    expect(logs).toEqual([])
+  })
+
+  it('a small fan-out under budget keeps every importer', () => {
+    const files = sharedFixtureRepo(5, 2)
+    expect(
+      selectBurnInTargets(['e2e/fixtures/shared.ts'], repoIo(files)),
+    ).toHaveLength(5)
+  })
+
+  it('fixture imported by every spec: bounded to the budget', () => {
+    const files = sharedFixtureRepo(220, 5)
+    const logs = []
+    const targets = selectBurnInTargets(
+      ['e2e/fixtures/shared.ts'],
+      repoIo(files, { log: (t) => logs.push(t) }),
+    )
+    // 900 runs / 10 repeats = 90 tests = 18 specs of 5 tests.
+    expect(targets).toHaveLength(18)
+    expect(targets).toEqual([...targets].sort())
+    expect(targets.every((path) => isE2eSpec(path))).toBe(true)
+    expect(logs).toEqual([
+      'e2e-burn-in-targets: 0 changed spec(s) + 18/220 spec(s) pulled in by ' +
+        'changed e2e support files (budget 900 test runs, ×10 repeats)',
+    ])
+  })
+
+  it('budget and repeats come from env when not injected', () => {
+    const files = sharedFixtureRepo(100, 1)
+    const io = repoIo(files, {
+      env: { E2E_BURN_IN_BUDGET: '60', E2E_BURN_IN: '3' },
+    })
+    delete io.repeats
+    expect(selectBurnInTargets(['e2e/fixtures/shared.ts'], io)).toHaveLength(
+      20,
+    )
+  })
+
+  it('mixed: changed spec at full repeats plus a bounded sample', () => {
+    const files = sharedFixtureRepo(220, 5)
+    files['e2e/s0000.spec.ts'] += Array.from(
+      { length: 20 },
+      (_, i) => `test('extra${String(i)}', () => {})\n`,
+    ).join('')
+    const targets = selectBurnInTargets(
+      ['e2e/s0000.spec.ts', 'e2e/fixtures/shared.ts'],
+      repoIo(files),
+    )
+    // Changed spec: 25 tests × 10 = 250 runs; 650 left → 65 tests → 13 specs.
+    expect(targets).toContain('e2e/s0000.spec.ts')
+    expect(targets).toHaveLength(14)
+  })
+
+  it('changed specs over budget still keep one pulled-in spec', () => {
+    const files = sharedFixtureRepo(50, 100)
+    const targets = selectBurnInTargets(
+      ['e2e/s0000.spec.ts', 'e2e/fixtures/shared.ts'],
+      repoIo(files),
+    )
+    expect(targets).toHaveLength(2)
+    expect(targets).toContain('e2e/s0000.spec.ts')
+  })
+
+  it('deterministic across runs and input order', () => {
+    const files = sharedFixtureRepo(220, 5)
+    const a = selectBurnInTargets(['e2e/fixtures/shared.ts'], repoIo(files))
+    const b = selectBurnInTargets(
+      ['e2e/fixtures/shared.ts'],
+      repoIo(files, { listSources: () => Object.keys(files).reverse() }),
+    )
+    expect(b).toEqual(a)
+  })
+
+  it('flaky specs are excluded before sampling', () => {
+    const files = sharedFixtureRepo(3, 1)
+    expect(
+      selectBurnInTargets(
+        ['e2e/fixtures/shared.ts'],
+        repoIo(files, { flakyPaths: ['e2e/s0001.spec.ts'] }),
+      ),
+    ).toEqual(['e2e/s0000.spec.ts', 'e2e/s0002.spec.ts'])
+  })
+
+  it('unreadable pulled-in spec counts as one test', () => {
+    const files = sharedFixtureRepo(3, 1)
+    const io = repoIo(files, {
+      readFile: (path) => {
+        if (path === 'e2e/s0001.spec.ts' && reads.has(path)) {
+          throw new Error('gone')
+        }
+        reads.add(path)
+        return files[path]
+      },
+      env: { E2E_BURN_IN_BUDGET: '20' },
+    })
+    const reads = new Set()
+    expect(selectBurnInTargets(['e2e/fixtures/shared.ts'], io)).toHaveLength(2)
   })
 })
 
@@ -520,9 +760,26 @@ describe('real repo defaults', () => {
   })
 
   it('fixture change selects real importers via default listSources', () => {
-    const targets = selectBurnInTargets(['e2e/fixtures/ensurePhotoFixtures.ts'])
+    const targets = selectBurnInTargets(
+      ['e2e/fixtures/ensurePhotoFixtures.ts'],
+      { env: { E2E_BURN_IN_BUDGET: '1000000' } },
+    )
     expect(targets).toContain('e2e/filmstrip.spec.ts')
     expect(targets.every((path) => isE2eSpec(path))).toBe(true)
+  })
+
+  it('default budget bounds a widely imported real fixture', () => {
+    const all = selectBurnInTargets(['e2e/fixtures/ensurePhotoFixtures.ts'], {
+      env: { E2E_BURN_IN_BUDGET: '1000000' },
+      log: () => {},
+    })
+    const bounded = selectBurnInTargets(
+      ['e2e/fixtures/ensurePhotoFixtures.ts'],
+      { env: {}, repeats: 10, log: () => {} },
+    )
+    expect(bounded.length).toBeGreaterThan(0)
+    expect(bounded.length).toBeLessThan(all.length)
+    expect(bounded.every((path) => all.includes(path))).toBe(true)
   })
 
   it('listE2eSourceFiles walks the repo e2e tree', () => {
